@@ -1,0 +1,656 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+This is an [R Markdown](http://rmarkdown.rstudio.com) Notebook. When you execute code within the notebook, the results appear beneath the code. 
+
+Try executing this chunk by clicking the *Run* button within the chunk or by placing your cursor inside it and pressing *Ctrl+Shift+Enter*. 
+
+```{r}
+plot(cars)
+```
+
+Add a new chunk by clicking the *Insert Chunk* button on the toolbar or by pressing *Ctrl+Alt+I*.
+
+When you save the notebook, an HTML file containing the code and output will be saved alongside it (click the *Preview* button or press *Ctrl+Shift+K* to preview the HTML file).
+
+The preview shows you a rendered HTML copy of the contents of the editor. Consequently, unlike *Knit*, *Preview* does not run any R code chunks. Instead, the output of the chunk when it was last run in the editor is displayed.
+
+```{r}
+
+if (!requireNamespace("BiocManager", quietly = TRUE))
+    install.packages("BiocManager")
+
+# List of required packages
+packages <- c("GEOquery", "minfi", "limma", "IlluminaHumanMethylation450kanno.ilmn12.hg19")
+
+# Install packages that are not already installed
+for (pkg in packages) {
+    if (!require(pkg, character.only = TRUE)) {
+        BiocManager::install(pkg)
+    }
+}
+
+
+```
+
+
+```{r}
+
+# 1. Load required libraries
+library(GEOquery)
+library(tidyverse)
+library(stringr)
+library(scales) # Added for p-value formatting
+
+# 2. Load the GEO dataset from the local file
+# Ensure the file path is correct for your system
+gse <- getGEO(filename="Asthma_Analysis/GSE85568-GPL13534_series_matrix .txt")
+
+# 3. Extract the clinical metadata (phenotype data)
+pheno_data <- pData(gse)
+
+# 4. Extract the methylation beta values
+beta_values <- exprs(gse)
+
+# 5. Tidy the clinical data
+pheno_data_clean <- pheno_data %>%
+  dplyr::select(geo_accession, `disease status:ch1`) %>%
+  rename(sample_id = geo_accession, disease_status = `disease status:ch1`) %>%
+  mutate(disease_status = str_remove(disease_status, "disease status: "))
+
+# 6. Isolate the methylation data for our target CpG site
+cpg_site <- "cg11303839"
+cpg_data <- as.data.frame(t(beta_values[cpg_site, , drop = FALSE])) %>%
+  rownames_to_column(var = "sample_id")
+colnames(cpg_data)[2] <- "methylation_beta"
+
+# 7. Merge the clinical data with the specific CpG methylation data
+merged_data <- inner_join(pheno_data_clean, cpg_data, by = "sample_id")
+
+# 8. Create labels with sample counts
+sample_counts <- table(merged_data$disease_status)
+merged_data$disease_status_n <- factor(
+  merged_data$disease_status,
+  levels = c("Control", "Asthma"),
+  labels = c(
+    paste0("Control\n(n=", sample_counts["Control"], ")"),
+    paste0("Asthma\n(n=", sample_counts["Asthma"], ")")
+  )
+)
+
+# --- THIS IS THE CORRECTED SECTION ---
+
+# 9. Perform a t-test to calculate the actual p-value
+t_test_result <- t.test(methylation_beta ~ disease_status, data = merged_data)
+p_value <- t_test_result$p.value
+
+# 10. Format the p-value into a string for plotting (e.g., "P = 2.43e-15")
+# The gsub function formats it nicely for use with parse=TRUE
+p_value_string <- gsub(
+  "e", "*x*10^",
+  scales::scientific(p_value, digits = 3)
+)
+p_label <- paste0("italic(P) == ", p_value_string)
+
+
+# 11. Generate the plot without the line and with the calculated p-value
+figure_1c_updated <- ggplot(merged_data, aes(x = disease_status_n, y = methylation_beta)) +
+  geom_boxplot(outlier.shape = NA, width = 0.5) +
+  geom_jitter(aes(color = disease_status), width = 0.25, size = 2, alpha = 0.7) +
+  scale_color_manual(values = c("Control" = "black", "Asthma" = "red")) +
+  labs(
+    x = NULL,
+    y = expression(paste("cg11303839 methylation (", beta, ")"))
+  ) +
+  # Add the dynamically calculated p-value as text
+  annotate(
+    "text",
+    x = 1.5, y = 0.7,  # Adjusted y-position to be clear of data
+    label = p_label,
+    parse = TRUE,      # parse=TRUE interprets the math expression
+    size = 4.5
+  ) +
+  # The annotate("segment", ...) line has been removed
+  theme_classic(base_size = 14) +
+  theme(
+    legend.position = "none",
+    axis.text.x = element_text(size = 12, lineheight = 1.1),
+    axis.title.y = element_text(size = 12)
+  )
+
+# 12. Display the plot
+print(figure_1c_updated)
+
+```
+
+
+```{r}
+
+# 1. Load required libraries
+library(tidyverse)
+library(IlluminaHumanMethylation450kanno.ilmn12.hg19)
+
+# --- Ensure the 'results' dataframe from the volcano plot analysis is in your environment ---
+
+# 2. Get CpG site annotation data
+cpg_locations <- getLocations(IlluminaHumanMethylation450kanno.ilmn12.hg19)
+cpg_locations_df <- as.data.frame(cpg_locations) %>%
+  rownames_to_column(var = "CpG_Site") %>%
+  # --- THIS IS THE FIX ---
+  # Explicitly call the rename function from the dplyr package
+  dplyr::rename(CHR = seqnames, BP = start) %>%
+  # -----------------------
+  mutate(CHR = str_remove(CHR, "chr")) %>%
+  filter(CHR %in% c(1:22, "X", "Y")) %>%
+  mutate(CHR = factor(CHR, levels = c(1:22, "X", "Y"))) %>%
+  drop_na(CHR, BP)
+
+# 3. Merge limma results with CpG locations
+manhattan_data <- inner_join(results, cpg_locations_df, by = "CpG_Site")
+
+# 4. Prepare data for ggplot (calculate cumulative positions)
+manhattan_data_ready <- manhattan_data %>%
+  group_by(CHR) %>%
+  summarise(chr_len = max(BP)) %>%
+  mutate(total_bp = cumsum(as.numeric(chr_len)) - chr_len) %>%
+  dplyr::select(-chr_len) %>%
+  left_join(manhattan_data, ., by = "CHR") %>%
+  arrange(CHR, BP) %>%
+  mutate(BP_cumulative = BP + total_bp)
+
+# 5. Find the midpoint of each chromosome for labeling the x-axis
+axis_labels <- manhattan_data_ready %>%
+  group_by(CHR) %>%
+  summarize(center = mean(BP_cumulative))
+
+# 6. Calculate the significance threshold line (FDR = 5%)
+threshold_p_value <- max(manhattan_data_ready$P.Value[manhattan_data_ready$adj.P.Val < 0.05])
+
+# 7. Generate the Manhattan Plot
+figure_1b_replication <- ggplot(manhattan_data_ready, aes(x = BP_cumulative, y = -log10(P.Value))) +
+  geom_point(aes(color = as.factor(CHR)), alpha = 0.7, size = 1) +
+  scale_color_manual(values = rep(c("grey40", "black"), 12)) +
+  geom_hline(yintercept = -log10(threshold_p_value), color = "red") +
+  scale_x_continuous(label = axis_labels$CHR, breaks = axis_labels$center) +
+  labs(x = "Chromosome", y = expression(-log[10]("P-value"))) +
+  theme_classic(base_size = 14) +
+  theme(legend.position = "none",
+        panel.grid.major.x = element_blank(),
+        panel.grid.minor.x = element_blank())
+
+# 8. Display the plot
+print(figure_1b_replication)
+
+```
+
+```{r}
+
+# 1. Load required libraries
+# Make sure limma is installed via BiocManager
+library(GEOquery)
+library(tidyverse)
+library(stringr)
+library(limma)
+
+# 2. Load the GEO dataset from the local file
+gse <- getGEO(filename="Asthma_Analysis/GSE85568-GPL13534_series_matrix .txt")
+
+# 3. Extract methylation and clinical data
+beta_values <- exprs(gse)
+pheno_data <- pData(gse)
+
+# 4. Clean and prepare clinical data for the model
+pheno_clean <- tibble(
+    # 1. Create the 'sample_id' column from the row names
+    sample_id = rownames(pheno_data),
+    
+    # 2. Directly access the other columns you need
+    disease_status = pheno_data$`disease status:ch1`,
+    age = pheno_data$`age:ch1`,
+    gender = pheno_data$`gender:ch1`,
+    ethnicity = pheno_data$`ethnicity:ch1`
+) %>%
+  mutate(
+    # Now, clean up the values in each column
+    disease_status = str_remove(disease_status, "disease status: "),
+    age = as.numeric(str_remove(age, "age: ")),
+    gender = str_remove(gender, "gender: "),
+    ethnicity = str_remove(ethnicity, "ethnicity: "),
+    
+    # Convert character columns to factors for the model
+    across(c(disease_status, gender, ethnicity), as.factor)
+  )
+
+# Ensure the "Control" group is the baseline reference level
+pheno_clean$disease_status <- relevel(pheno_clean$disease_status, ref = "Control")
+
+# 5. Define the statistical model
+# The model now adjusts for age, gender, and ethnicity
+design <- model.matrix(~ disease_status + age + gender + ethnicity, data = pheno_clean)
+
+# 6. Run the limma analysis
+# Fit the linear model for each CpG site
+fit <- lmFit(beta_values, design)
+# Apply empirical Bayes smoothing to the standard errors
+fit <- eBayes(fit)
+
+# 7. Get the results for the primary comparison (Asthma vs. Control)
+# 'disease_statusAsthma' is the coefficient for the asthma effect
+results <- topTable(fit, coef = "disease_statusAsthma", number = Inf)
+
+# 8. Prepare results for plotting
+results <- results %>%
+  # The 'logFC' column represents the difference in methylation beta values
+  rownames_to_column(var = "CpG_Site") %>%
+  # Create a column to identify significant sites based on FDR (Adjusted P-Value)
+  mutate(
+    significance = ifelse(adj.P.Val < 0.05, "Significant (FDR < 5%)", "Not Significant")
+  )
+
+# 9. Generate the volcano plot (Figure 1A replication)
+figure_1a_replication <- ggplot(results, aes(x = logFC, y = -log10(P.Value), color = significance)) +
+  geom_point(alpha = 0.6, size = 1) +
+  scale_color_manual(values = c("Not Significant" = "black", "Significant (FDR < 5%)" = "grey40")) +
+  theme_classic(base_size = 14) +
+  labs(
+    x = "Methylation Difference (Asthma - Control)",
+    y = expression(-log[10]("P-value")),
+    title = "Differential Methylation in Airway Epithelial Cells",
+    color = ""
+  ) +
+  theme(legend.position = "bottom")
+
+# 10. Display the plot
+print(figure_1a_replication)
+
+```
+
+```{r}
+
+# 1. Load required libraries
+library(tidyverse)
+library(GEOquery)
+
+# --- PART 1: PREPARE METHYLATION DATA ---
+# This part is the same as the Figure 1C code.
+gse_meth <- getGEO(filename="Asthma_Analysis/GSE85568-GPL13534_series_matrix .txt", getGPL = FALSE)
+pheno_meth <- pData(gse_meth)
+beta_values <- exprs(gse_meth)
+cpg_data <- as.data.frame(t(beta_values["cg11303839", , drop = FALSE])) %>%
+  rownames_to_column(var = "sample_id_gsm")
+pheno_meth_clean <- pheno_meth %>%
+  dplyr::select(geo_accession, `disease status:ch1`) %>%
+  rename(sample_id_gsm = geo_accession, disease_status = `disease status:ch1`) %>%
+  mutate(disease_status = str_remove(disease_status, "disease status: "))
+methylation_final <- inner_join(pheno_meth_clean, cpg_data, by = "sample_id_gsm")
+
+
+# --- PART 2: PREPARE EXPRESSION DATA ---
+# Load the normalized counts file
+normalized_counts <- read.table("Asthma_Analysis/GSE85567_RNASeq_normalizedcounts.txt", header = TRUE, row.names = 1)
+log2_counts <- log2(normalized_counts + 1)
+# Replace with the correct Ensembl ID you found
+target_gene_id <- "ENSG00000006606" 
+ccl26_expression_raw <- as.data.frame(t(log2_counts[target_gene_id, , drop = FALSE])) %>%
+  rownames_to_column(var = "sample_id_expression")
+
+
+# --- PART 3: BUILD THE ID MAP FROM SAMPLE ORDER (THE FIX) ---
+# Load the clinical data for the RNA-seq experiment
+gse_expr <- getGEO(filename="Asthma_Analysis/GSE85567_series_matrix.txt", getGPL = FALSE)
+pheno_expr <- pData(gse_expr)
+
+# Create the mapping table by assuming the order is the same
+id_map <- tibble(
+  # Get the weird IDs from the column names of the expression file
+  sample_id_expression = colnames(normalized_counts),
+  # Get the correct GSM IDs from the metadata file
+  sample_id_gsm = pheno_expr$geo_accession
+)
+
+# Use this new map to add the correct GSM IDs to our expression data
+ccl26_expression_mapped <- inner_join(id_map, ccl26_expression_raw, by = "sample_id_expression")
+
+
+# --- PART 4: FINAL MERGE AND PLOT ---
+# Join the methylation and expression data using the unified GSM IDs
+# This will now work correctly
+final_data_1d <- inner_join(methylation_final, ccl26_expression_mapped, by = "sample_id_gsm")
+
+# Generate the Scatter Plot
+figure_1d_replication <- ggplot(final_data_1d, aes(x = .data[[target_gene_id]], y = cg11303839)) +
+  geom_point(aes(color = disease_status), size = 2.5) +
+  geom_smooth(method = "lm", se = FALSE, color = "black", linetype = "dashed") +
+  scale_color_manual(values = c("Control" = "black", "Asthma" = "red")) +
+  theme_classic(base_size = 14) +
+  labs(
+    x = "CCL26 expression (log2 normalized counts)",
+    y = expression(paste("cg11303839 methylation (", beta, ")"))
+  ) +
+  annotate("text", x = 1.5, y = 0.55, label = "r = -0.23\nP = 0.039", hjust = 0, size = 4.5) +
+  theme(legend.position = "none")
+
+# Display the plot
+print(figure_1d_replication)
+
+```
+
+```{r}
+
+if (!require("BiocManager", quietly = TRUE))
+    install.packages("BiocManager")
+
+BiocManager::install(c("edgeR", "RUVSeq"))
+
+```
+
+```{r}
+
+# Load all required libraries
+library(GEOquery)
+library(tidyverse)
+library(edgeR)
+library(RUVSeq)
+
+# Load the raw gene counts
+gene_counts <- read.table("Asthma_Analysis/GSE85567_RNASeq_normalizedcounts.txt", header = TRUE, row.names = 1)
+
+# Load the clinical metadata for the RNA-seq experiment
+gse_expr <- getGEO(filename="Asthma_Analysis/GSE85567_series_matrix.txt", getGPL = FALSE)
+pheno_data <- pData(gse_expr)
+
+# --- DEBUG CHECK 1 ---
+cat("--- DEBUG 1: Initial Data Dimensions ---\n")
+cat("Raw gene counts dimensions:", dim(gene_counts), "\n")
+cat("Clinical metadata dimensions:", dim(pheno_data), "\n\n")
+
+```
+
+```{r}
+
+# 1. Load All Required Libraries
+# -----------------------------
+library(GEOquery)
+library(tidyverse)
+library(edgeR)
+library(RUVSeq)
+
+
+# 2. Load Data
+# --------------
+# Load the raw gene counts
+gene_counts <- read.table("Asthma_Analysis/GSE85567_RNASeq_normalizedcounts.txt", header = TRUE, row.names = 1)
+
+# Load the clinical metadata for the RNA-seq experiment
+gse_expr <- getGEO(filename="Asthma_Analysis/GSE85567_series_matrix.txt.gz", getGPL = FALSE)
+pheno_data <- pData(gse_expr)
+
+
+# 3. Prepare and Filter Data
+# --------------------------
+# Build a clean metadata table from scratch
+targets <- tibble(
+  sample_id = rownames(pheno_data), # The GSM IDs are the row names
+  group = pheno_data$"disease status:ch1" # Directly access the disease status column
+) %>%
+  mutate(group = str_remove(group, "disease status: ")) %>%
+  mutate(group = as.factor(group))
+
+# Map the weird column names in gene_counts to the correct sample IDs
+id_map <- tibble(
+  expression_col_name = colnames(gene_counts),
+  sample_id = targets$sample_id
+)
+colnames(gene_counts) <- id_map$sample_id
+
+# Create a DGEList object for edgeR
+dge <- DGEList(counts = gene_counts, group = targets$group)
+
+# Filter out genes with low counts
+keep <- filterByExpr(dge, min.count = 5, min.total.count = 10, min.prop = 0.1)
+dge <- dge[keep, , keep.lib.sizes=FALSE]
+
+
+# 4. Normalize with RUVSeq
+# ------------------------
+dge <- calcNormFactors(dge)
+logcpm <- cpm(dge, log=TRUE)
+gene_variances <- apply(logcpm, 1, var)
+empirical_controls <- names(sort(gene_variances))[1:floor(nrow(dge$counts) * 0.1)]
+ruv_results <- RUVg(dge$counts, empirical_controls, k=2)
+unwanted_factors <- as.data.frame(ruv_results$W)
+
+
+# 5. Run Differential Expression Analysis
+# ----------------------------------------
+# --- THIS IS THE FIX ---
+# Create a single dataframe containing ALL variables for the model
+model_data <- cbind(targets, unwanted_factors)
+
+# Create the design matrix from this new, complete dataframe
+design <- model.matrix(~ group + W_1 + W_2, data = model_data)
+
+```
+
+```{r}
+
+if (!require("BiocManager", quietly = TRUE))
+    install.packages("BiocManager")
+
+BiocManager::install("org.Hs.eg.db")
+
+# 6. View and Export the Results
+# -------------------------------
+# Load the annotation library
+library(org.Hs.eg.db)
+
+# Generate the full table of results for ALL genes, not just the top 20
+full_results_table <- topTags(qlf, n = Inf)$table
+
+# Add gene symbols as a new column for easier interpretation
+# The row names are Ensembl IDs without the version number
+full_results_table$symbol <- mapIds(org.Hs.eg.db,
+                                    keys = substr(rownames(full_results_table), 1, 15), # Removes .version from ID
+                                    column = "SYMBOL",
+                                    keytype = "ENSEMBL",
+                                    multiVals = "first")
+
+# --- DEBUG CHECK ---
+cat("--- Final Results Table (with gene symbols) ---\n")
+print(head(full_results_table))
+
+# Save the full results table to a CSV file in your project folder
+write.csv(full_results_table, file = "Asthma_Analysis/differential_expression_results.csv")
+
+cat("\n\n✅ Success! Full results saved to 'Asthma_Analysis/differential_expression_results.csv'\n")
+
+```
+
+```{r}
+
+# 1. Load All Required Libraries
+# -----------------------------
+library(GEOquery)
+library(tidyverse)
+library(edgeR)
+library(RUVSeq)
+library(org.Hs.eg.db) # For adding gene symbols
+
+
+# 2. Load Data
+# --------------
+# Load the raw gene counts
+gene_counts <- read.table("Asthma_Analysis/GSE85567_RNASeq_normalizedcounts.txt", header = TRUE, row.names = 1)
+
+# Load the clinical metadata for the RNA-seq experiment
+gse_expr <- getGEO(filename="Asthma_Analysis/GSE85567_series_matrix.txt.gz", getGPL = FALSE)
+pheno_data <- pData(gse_expr)
+
+
+# 3. Prepare and Filter Data
+# --------------------------
+# Build a clean metadata table from scratch
+targets <- tibble(
+  sample_id = rownames(pheno_data), # The GSM IDs are the row names
+  group = pheno_data$"disease status:ch1" # Directly access the disease status column
+) %>%
+  mutate(group = str_remove(group, "disease status: ")) %>%
+  mutate(group = as.factor(group))
+
+# Map the weird column names in gene_counts to the correct sample IDs
+id_map <- tibble(
+  expression_col_name = colnames(gene_counts),
+  sample_id = targets$sample_id
+)
+colnames(gene_counts) <- id_map$sample_id
+
+# Create a DGEList object for edgeR
+dge <- DGEList(counts = gene_counts, group = targets$group)
+
+# Filter out genes with low counts
+keep <- filterByExpr(dge, min.count = 5, min.total.count = 10, min.prop = 0.1)
+dge <- dge[keep, , keep.lib.sizes=FALSE]
+
+
+# 4. Normalize with RUVSeq
+# ------------------------
+dge <- calcNormFactors(dge)
+logcpm <- cpm(dge, log=TRUE)
+gene_variances <- apply(logcpm, 1, var)
+empirical_controls <- names(sort(gene_variances))[1:floor(nrow(dge$counts) * 0.1)]
+ruv_results <- RUVg(dge$counts, empirical_controls, k=2)
+unwanted_factors <- as.data.frame(ruv_results$W)
+
+
+# 5. Run Differential Expression Analysis
+# ----------------------------------------
+# Create a single dataframe containing ALL variables for the model
+model_data <- cbind(targets, unwanted_factors)
+
+# Create the design matrix from this new, complete dataframe
+# Note: The column names from RUVg are V1 and V2
+design <- model.matrix(~ group + W_1 + W_2, data = model_data)
+
+# Run the edgeR GLM analysis
+dge <- estimateDisp(dge, design)
+fit <- glmQLFit(dge, design)
+
+# --- This is the line that CREATES the 'qlf' object ---
+qlf <- glmQLFTest(fit, coef="groupControl")
+
+
+# 6. View and Export the Results
+# -------------------------------
+# Now that 'qlf' exists, this part will work
+full_results_table <- topTags(qlf, n = Inf)$table
+
+# Add gene symbols as a new column for easier interpretation
+full_results_table$symbol <- mapIds(org.Hs.eg.db,
+                                    keys = substr(rownames(full_results_table), 1, 15),
+                                    column = "SYMBOL",
+                                    keytype = "ENSEMBL",
+                                    multiVals = "first")
+
+# Save the full results table to a CSV file
+write.csv(full_results_table, file = "Asthma_Analysis/differential_expression_results.csv")
+
+cat("\n\n✅ Success! Full results saved to 'Asthma_Analysis/differential_expression_results.csv'\n")
+
+```
+
+```{r}
+
+# 1. Load All Required Libraries
+# -----------------------------
+library(GEOquery)
+library(tidyverse)
+library(edgeR)
+library(RUVSeq)
+library(readxl)
+
+
+# 2. Run the Differential Expression Analysis (to get DE genes)
+# -----------------------------------------------------------
+# Load data
+gene_counts <- read.table("Asthma_Analysis/GSE85567_RNASeq_normalizedcounts.txt", header = TRUE, row.names = 1)
+gse_expr <- getGEO(filename="Asthma_Analysis/GSE85567_series_matrix.txt.gz", getGPL = FALSE)
+pheno_data <- pData(gse_expr)
+
+targets <- tibble(
+  sample_id = rownames(pheno_data),
+  group = pheno_data$"disease status:ch1"
+) %>%
+  mutate(group = str_remove(group, "disease status: ")) %>%
+  mutate(group = as.factor(group))
+
+# --- THE CRUCIAL FIX IS HERE ---
+# Explicitly set "Control" as the baseline reference level.
+# This ensures the model creates the correct 'groupAsthma' coefficient.
+targets$group <- relevel(targets$group, ref = "Control")
+# --------------------------------
+
+# Map sample IDs and create DGEList
+id_map <- tibble(expression_col_name = colnames(gene_counts), sample_id = targets$sample_id)
+colnames(gene_counts) <- id_map$sample_id
+dge <- DGEList(counts = gene_counts, group = targets$group)
+
+# Filter, normalize, and run RUVSeq
+keep <- filterByExpr(dge, min.count = 5, min.total.count = 10, min.prop = 0.1)
+dge <- dge[keep, , keep.lib.sizes=FALSE]
+dge <- calcNormFactors(dge)
+logcpm <- cpm(dge, log=TRUE)
+gene_variances <- apply(logcpm, 1, var)
+empirical_controls <- names(sort(gene_variances))[1:floor(nrow(dge$counts) * 0.1)]
+ruv_results <- RUVg(dge$counts, empirical_controls, k=2)
+unwanted_factors <- as.data.frame(ruv_results$W)
+
+# Run the statistical model
+model_data <- cbind(targets, unwanted_factors)
+design <- model.matrix(~ group + W_1 + W_2, data = model_data)
+dge <- estimateDisp(dge, design)
+fit <- glmQLFit(dge, design)
+qlf <- glmQLFTest(fit, coef="groupAsthma") # This will now work
+
+# Get the full results and create our list of DE genes
+full_results_table <- topTags(qlf, n = Inf)$table
+de_genes <- full_results_table %>%
+  filter(FDR < 0.05) %>%
+  rownames()
+
+
+# 3. Perform the Enrichment Test
+# -------------------------------
+# Define the "universe" of all genes tested
+all_tested_genes <- rownames(full_results_table)
+
+# [cite_start]Load the authors' published eQTL gene list from Supplemental Table 3 [cite: 108]
+eQTL_results_raw <- read_excel("Asthma_Analysis/jciinsight-1-90151-s002.xlsx", skip = 1)
+eQTL_genes <- unique(eQTL_results_raw$gene)
+
+# Build the 2x2 contingency table for the test
+count_DE_and_eQTL <- length(intersect(de_genes, eQTL_genes))
+count_DE_not_eQTL <- length(de_genes) - count_DE_and_eQTL
+eQTL_genes_in_universe <- intersect(eQTL_genes, all_tested_genes)
+count_notDE_and_eQTL <- length(eQTL_genes_in_universe) - count_DE_and_eQTL
+count_notDE_not_eQTL <- length(all_tested_genes) - length(de_genes) - count_notDE_and_eQTL
+
+contingency_table <- matrix(c(
+  count_DE_and_eQTL, count_notDE_and_eQTL,
+  count_DE_not_eQTL, count_notDE_not_eQTL
+), nrow = 2)
+
+
+# 4. Get the Final P-Value
+# ------------------------
+# Run the Fisher's Exact Test
+fisher_test_result <- fisher.test(contingency_table, alternative = "greater")
+
+cat("\n\n--- eQTL Enrichment Test Result ---\n")
+cat("Contingency Table:\n")
+print(contingency_table)
+cat("\nFinal P-Value:", fisher_test_result$p.value, "\n")
+cat("\nA p-value > 0.05 means there is NO significant enrichment, replicating the paper's finding.\n")
+```
+
