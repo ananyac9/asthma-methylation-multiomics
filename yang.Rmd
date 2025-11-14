@@ -1,0 +1,1312 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+This is an [R Markdown](http://rmarkdown.rstudio.com) Notebook. When you execute code within the notebook, the results appear beneath the code. 
+
+Try executing this chunk by clicking the *Run* button within the chunk or by placing your cursor inside it and pressing *Ctrl+Shift+Enter*. 
+
+```{r}
+plot(cars)
+```
+
+Add a new chunk by clicking the *Insert Chunk* button on the toolbar or by pressing *Ctrl+Alt+I*.
+
+When you save the notebook, an HTML file containing the code and output will be saved alongside it (click the *Preview* button or press *Ctrl+Shift+K* to preview the HTML file).
+
+The preview shows you a rendered HTML copy of the contents of the editor. Consequently, unlike *Knit*, *Preview* does not run any R code chunks. Instead, the output of the chunk when it was last run in the editor is displayed.
+install BiocManager, minfi, GEOquery, limma, IlluminaHumanMethylation450kmanifest
+
+```{r}
+if (!require("BiocManager", quietly = TRUE))
+  install.packages("BiocManager")
+BiocManager::install(c("GEOquery", "limma"))
+BiocManager::install(c("minfi", "IlluminaHumanMethylation450kmanifest"))
+```
+```{r}
+library(GEOquery)
+library(limma)
+library(minfi)
+library(IlluminaHumanMethylation450kmanifest)
+```
+
+```{r}
+gse_meth <- getGEO("GSE65163")
+full_targets_meth <- pData(gse_meth[[1]])
+baseDir <- "C:/Users/anany/Downloads/GSE65163_RAW/"
+```
+```{r}
+colnames(full_targets_meth)
+```
+```{r}
+head(full_targets_meth$supplementary_file.1)
+```
+```{r}
+full_targets_meth$Basename <- basename(full_targets_meth$supplementary_file.1)
+full_targets_meth$Basename <- sub("_Red\\.idat\\.gz$", "", full_targets_meth$Basename)
+full_targets_meth$Basename <- file.path(baseDir, full_targets_meth$Basename)
+```
+
+```{r}
+rgset_meth <- read.metharray.exp(targets = full_targets_meth)
+print(rgset_meth)
+```
+```{r}
+mset <- preprocessSWAN(rgset_meth)
+
+mset_genomic <- mapToGenome(mset)
+
+mset_filtered <- dropLociWithSnps(mset_genomic)
+```
+```{r}
+qc <- getQC(mset)
+plotQC(qc)
+```
+```{r}
+mvalues <- getM(mset_filtered)
+print(mvalues)
+
+betavalues <- getBeta(mset_filtered)
+print(betavalues)
+```
+```{r}
+gse_exp <- getGEO("GSE65204")
+full_targets_exp <- pData(gse_exp[[1]])
+
+baseDir_exp <- "C:/Users/anany/Downloads/GSE65204_RAW"
+```
+```{r}
+colnames(full_targets_exp)
+```
+```{r}
+head(full_targets_exp$supplementary_file)
+```
+```{r}
+head(full_targets_exp$characteristics_ch1)
+```
+```{r}
+targets_exp <- data.frame(
+FileName = basename(as.character(full_targets_exp$supplementary_file)),
+Group = full_targets_exp$characteristics_ch1
+)
+```
+```{r}
+head(targets_exp)
+```
+```{r}
+rgset_exp <- read.maimages(targets_exp, path = baseDir_exp, source = "agilent", columns = list(E = "gProcessedSignal"))
+print(rgset_exp)
+```
+```{r}
+eb <- backgroundCorrect(rgset_exp, method = "normexp")
+```
+```{r}
+normalized_data <- normalizeBetweenArrays(eb, method = "quantile")
+print(normalized_data)
+```
+```{r}
+expression_matrix <- normalized_data$E
+head(expression_matrix[1:5])
+```
+```{r}
+if (!require("pheatmap", quietly = TRUE))
+install.packages("pheatmap")
+library(pheatmap)
+
+probe_variances <- apply(betavalues, 1, var)
+top_probes <- names(sort(probe_variances, decreasing = TRUE))[1:5]
+top_data <- betavalues[top_probes, ]
+clean_labels <- paste(full_targets_meth$geo_accession, full_targets_meth$Group, sep = "_")
+names(clean_labels) <- basename(full_targets_meth$Basename)
+ordered_labels <- clean_labels[match(colnames(top_data), names(clean_labels))]
+pheatmap(top_data,
+         main = "Heatmap of Top 5 Variable Probes",
+         labels_col = ordered_labels, # Pass the clean labels
+         show_rownames = FALSE,
+         fontsize_col = 5)
+```
+```{r}
+if (!require("ggplot2", quietly = TRUE))
+install.packages("ggplot2")
+library(ggplot2)
+all_probe_data <- getAnnotation(mset_filtered)
+alox15_probes <- all_probe_data[grep("ALOX15", all_probe_data$UCSC_RefGene_Name), ]
+print(alox15_probes)
+probe_of_interest <- "cg12786765"
+
+plot_df <- data.frame(
+Sample = colnames(betavalues),
+Methylation = betavalues[probe_of_interest, ],
+Group = full_targets_meth$characteristics_ch1.1
+)
+plot_df$Group <- ifelse(plot_df$Group == "asthma: TRUE", "Asthma", "Control")
+ggplot(plot_df, aes(x = Group, y = Methylation, fill = Group)) +
+geom_boxplot() +
+geom_jitter(width = 0.1) + # Adds the individual data points
+ggtitle(paste("Methylation for", probe_of_interest, "(ALOX15)")) +
+theme_minimal()
+```
+
+```{r}
+all_annotations <- getAnnotation(mset_filtered)
+head(all_annotations)
+```
+```{r}
+group_column_name <- "characteristics_ch1.1" 
+
+# Create the new 'Group' column in the full_targets_meth data frame
+full_targets_meth$Group <- ifelse(full_targets_meth[[group_column_name]] == "asthma: TRUE", 
+                                "Asthma", "Control")
+
+# --- Verify that it worked ---
+print("Verification of methylation groups:")
+table(full_targets_meth$Group)
+```
+```{r}
+colnames(full_targets_meth)
+```
+```{r}
+# --- Example (replace with your actual column names!) ---
+age_col <- "age:ch1"
+sex_col <- "gender:ch1"
+race_col <- "race_aa:ch1" # Using African American as an example
+
+# Ensure age is numeric (it might be character like "age: 11")
+# We extract just the number part
+full_targets_meth$AgeNumeric <- as.numeric(sub(".*: ", "", full_targets_meth[[age_col]]))
+
+# Ensure sex and race are factors (categorical variables)
+full_targets_meth$SexFactor <- as.factor(full_targets_meth[[sex_col]])
+full_targets_meth$RaceFactor <- as.factor(full_targets_meth[[race_col]])
+
+# Check the prepared columns
+summary(full_targets_meth[, c("AgeNumeric", "SexFactor", "RaceFactor")])
+```
+```{r}
+# --- Ensure 'Group' column exists ---
+# (Using the column confirmed previously)
+group_column_name <- "characteristics_ch1.1" 
+full_targets_meth$Group <- ifelse(full_targets_meth[[group_column_name]] == "asthma: TRUE", 
+                                "Asthma", "Control")
+# Make sure Group is a factor for the model matrix
+full_targets_meth$Group <- as.factor(full_targets_meth$Group) 
+
+# --- Create the *adjusted* design matrix ---
+# The formula now includes Group + Covariates
+# NOTE: Using '~ Group + ...' includes an intercept term automatically.
+design_adjusted <- model.matrix(~ Group + AgeNumeric + SexFactor + RaceFactor, 
+                                data = full_targets_meth)
+
+# Check the design matrix
+head(design_adjusted)
+
+# --- Define the contrast (still comparing Asthma vs Control) ---
+# The 'GroupControl' coefficient represents the difference from the baseline (Asthma)
+# Alternatively, use '~ 0 + Group + ...' and define contrasts as before if preferred.
+# For simplicity with covariates, comparing the Group coefficient is common.
+# Assuming 'Control' is the reference level (check with levels(full_targets_meth$Group))
+# We are interested in the coefficient for the 'Asthma' group level.
+# If 'Asthma' is the reference, we look at 'GroupControl'. Let's assume Control is reference.
+# The contrast now targets the specific group coefficient after accounting for others.
+colnames(design_adjusted) # Find the exact name for the Asthma group coefficient, e.g., "GroupAsthma"
+
+# If "GroupAsthma" exists, this contrast tests if Asthma is different from the baseline (Control)
+contrast_adjusted <- makeContrasts(-GroupControl, levels=design_adjusted) 
+
+# --- Run limma with the adjusted model ---
+fit_adj <- lmFit(mvalues, design_adjusted)
+fit_adj2 <- contrasts.fit(fit_adj, contrasts=contrast_adjusted) # Use contrasts argument here
+fit_adj2 <- eBayes(fit_adj2)
+
+# --- Get adjusted results ---
+dmp_results_adjusted <- topTable(fit_adj2, n = Inf)
+
+# --- Check the new results ---
+head(dmp_results_adjusted)
+
+# --- Count the significant DMPs again ---
+alpha <- 0.05
+significant_dmps_adjusted <- dmp_results_adjusted[dmp_results_adjusted$adj.P.Val < alpha, ]
+
+# Annotate with gene symbols (as done before)
+meth_anno <- getAnnotation(mset_filtered)
+significant_dmps_adjusted$Gene.Symbol <- meth_anno[match(rownames(significant_dmps_adjusted), rownames(meth_anno)), "UCSC_RefGene_Name"]
+significant_dmps_adjusted$Gene.Symbol <- sapply(strsplit(significant_dmps_adjusted$Gene.Symbol, ";"), `[`, 1)
+significant_dmps_adjusted <- significant_dmps_adjusted[!is.na(significant_dmps_adjusted$Gene.Symbol) & significant_dmps_adjusted$Gene.Symbol != "", ]
+
+# Final count
+num_significant_genes_adjusted <- length(unique(significant_dmps_adjusted$Gene.Symbol))
+print(paste("Number of unique genes significantly methylated (adjusted model):", 
+            num_significant_genes_adjusted))
+```
+```{r}
+colnames(design_adjusted)
+```
+
+```{r}
+colnames(design_batch_adjusted)
+```
+```{r}
+# See how Asthma and Control samples are distributed across chips
+confounding_check <- table(full_targets_meth$Group, full_targets_meth$SentrixID)
+print(confounding_check)
+```
+--- not running it from here lets see ----
+```{r}
+design <- model.matrix(~ 0 + Group, data = full_targets_meth)
+colnames(design) <- c("Asthma", "Control") # Clean up names
+
+contrast.matrix <- makeContrasts(Asthma - Control, levels = design)
+
+fit <- lmFit(mvalues, design)
+fit2 <- contrasts.fit(fit, contrast.matrix)
+fit2 <- eBayes(fit2)
+
+dmp_results <- topTable(fit2, n = Inf)
+```
+```{r}
+head(dmp_results)
+```
+
+```{r}
+significant_probes <- dmp_results_adjusted[dmp_results_adjusted$adj.P.Val < 0.05, ]
+
+# Get the gene names for just those significant probes
+significant_genes <- all_annotations[rownames(significant_probes), ]
+
+# You can now look at this table
+head(significant_genes)
+```
+dont need to run this also i think
+```{r}
+colnames(full_targets_exp)
+```
+```{r}
+# --- 1. Identify Covariate Columns ---
+age_col_exp <- "age:ch1"
+sex_col_exp <- "gender:ch1"
+race_col_exp <- "race_aa:ch1" # Using African American as the relevant factor
+group_col_exp <- "characteristics_ch1" # This has "asthma: TRUE/FALSE"
+
+# --- 2. Create the 'Group' column in the main metadata object ---
+full_targets_exp$Group <- ifelse(full_targets_exp[[group_col_exp]] == "asthma: TRUE", 
+                                "Asthma", "Control")
+full_targets_exp$Group <- as.factor(full_targets_exp$Group)
+
+# --- 3. Create Numeric/Factor Covariates ---
+full_targets_exp$AgeNumeric <- as.numeric(sub(".*: ", "", full_targets_exp[[age_col_exp]]))
+full_targets_exp$SexFactor <- as.factor(full_targets_exp[[sex_col_exp]])
+full_targets_exp$RaceFactor <- as.factor(full_targets_exp[[race_col_exp]])
+
+# --- 4. Verify Covariates ---
+print("Verification of Expression Covariates:")
+summary(full_targets_exp[, c("Group", "AgeNumeric", "SexFactor", "RaceFactor")])
+levels(full_targets_exp$Group) # Check the baseline level (e.g., "Asthma")
+
+# --- 5. Create the *adjusted* design matrix ---
+design_exp_adj <- model.matrix(~ Group + AgeNumeric + SexFactor + RaceFactor, 
+                               data = full_targets_exp)
+
+# --- 6. Check Colnames and Define Contrast ---
+print("Design matrix column names:")
+print(colnames(design_exp_adj)) 
+
+# Since "Asthma" is the baseline, the coefficient "GroupControl" 
+# represents the (Control - Asthma) difference.
+# We want (Asthma - Control), so we test the *negative* of this.
+contrast_exp_adj <- makeContrasts(-GroupControl, levels=design_exp_adj) 
+
+# --- 7. Run limma ---
+fit_exp_adj <- lmFit(expression_matrix, design_exp_adj)
+fit_exp_adj2 <- contrasts.fit(fit_exp_adj, contrasts=contrast_exp_adj) 
+fit_exp_adj2 <- eBayes(fit_exp_adj2)
+
+# --- 8. Get the new, adjusted results ---
+# This creates the adjusted deg_results object
+deg_results <- topTable(fit_exp_adj2, n = Inf)
+
+# --- 9. View the new top genes ---
+print("Top DEGs from adjusted model:")
+head(deg_results)
+```
+
+--- re run from here if it fails ----
+```{r}
+table(targets_exp$Group)
+
+design_exp <- model.matrix(~ 0 + Group, data = targets_exp)
+colnames(design_exp) <- c("Asthma", "Control") # Clean up names
+
+contrast_matrix_exp <- makeContrasts(Asthma - Control, levels = design_exp)
+
+fit_exp <- lmFit(expression_matrix, design_exp)
+fit_exp2 <- contrasts.fit(fit_exp, contrast_matrix_exp)
+fit_exp2 <- eBayes(fit_exp2)
+
+
+deg_results <- topTable(fit_exp2, n = Inf)
+
+head(deg_results)
+```
+```{r}
+deg_results$Probe <- rownames(deg_results)
+
+# --- 2. Get the annotation data ---
+# The 'genes' component of your rgset_exp object has the names
+gene_annotations <- rgset_exp$genes
+
+# --- 3. Add the gene names to your results ---
+# We match the 'Probe' column in your results to the 'ProbeName' in the annotations
+deg_results$GeneName <- gene_annotations[match(deg_results$Probe, gene_annotations$ProbeName), "GeneName"]
+
+# --- 4. View your final, annotated results table ---
+head(deg_results)
+
+# --- 5. Get your final list of significant genes ---
+significant_degs <- deg_results[deg_results$adj.P.Val < 0.05, ]
+
+print("significantly differentially expressed genes:")
+print(significant_degs)
+print(length(significant_degs))
+```
+```{r}
+BiocManager::install("agilp")
+library(agilp)
+```
+```{r}
+# Get the methylation "dictionary"
+meth_anno <- getAnnotation(mset_filtered)
+
+# Add gene symbols to dmp_results
+dmp_results$Gene.Symbol <- meth_anno[match(rownames(dmp_results), rownames(meth_anno)), "UCSC_RefGene_Name"]
+
+# Clean up any probes mapping to multiple genes (e.g., "GENE1;GENE2")
+dmp_results$Gene.Symbol <- sapply(strsplit(dmp_results$Gene.Symbol, ";"), `[`, 1)
+
+# Verify
+print("Methylation data prepared. First few gene symbols:")
+head(dmp_results$Gene.Symbol)
+```
+```{r}
+if (!require("agilp", quietly = TRUE))
+    BiocManager::install("agilp")
+if (!require("AnnotationDbi", quietly = TRUE))
+    BiocManager::install("AnnotationDbi")
+```
+
+```{r}
+library(AnnotationDbi)
+library(agilp)
+```
+```{r}
+meth_anno <- getAnnotation(mset_filtered)
+
+# Create the "Gene.Symbol" column by matching row names
+dmp_results$Gene.Symbol <- meth_anno[match(rownames(dmp_results), rownames(meth_anno)), "UCSC_RefGene_Name"]
+
+# Clean the gene symbols (this is critical!)
+dmp_results$Gene.Symbol <- sapply(strsplit(dmp_results$Gene.Symbol, ";"), `[`, 1)
+
+# Verify
+print("Methylation data prepared. First 5 gene symbols:")
+head(dmp_results$Gene.Symbol, 5)
+```
+```{r}
+# --- 1. Get the expression "dictionary" ---
+# This has the 'ProbeName' column we need
+library(agilp)
+library(AnnotationDbi)
+
+exp_anno <- rgset_exp$genes
+
+# --- 2. Add the 'ProbeName' column to your results ---
+deg_results$ProbeName <- exp_anno[match(deg_results$Probe, exp_anno$ProbeName), "ProbeName"]
+
+# --- 3. Translate 'ProbeName' to 'Gene.Symbol' ---
+# We will use our new 'agilp.db' dictionary
+# It will look up the PROBEID and return the SYMBOL
+#deg_results$Gene.Symbol <- mapIds(agilp.db,
+                                  #keys = deg_results$ProbeName,
+                                  #column = "SYMBOL",
+                                  #keytype = "PROBEID",
+                                  #multiVals = "first")
+
+# --- 4. Verify the translation ---
+#print("Expression gene symbol mapping (NA vs. Mapped):")
+#table(is.na(deg_results$Gene.Symbol))
+```
+```{r}
+# --- 1. Install and load the dictionary packages ---
+if (!requireNamespace("AnnotationDbi", quietly = TRUE))
+    BiocManager::install("AnnotationDbi")
+if (!requireNamespace("org.Hs.eg.db", quietly = TRUE))
+    BiocManager::install("org.Hs.eg.db")
+    
+library(AnnotationDbi)
+library(org.Hs.eg.db)
+
+# --- 2. Get the expression "dictionary" ---
+exp_anno <- rgset_exp$genes
+
+# --- 3. Create a new, empty column in the *dictionary* ---
+exp_anno$Gene.Symbol <- NA
+
+# --- 4. Pass 1: Translate RefSeq (NM_) IDs ---
+refseq_indices <- grep("^NM_", exp_anno$SystematicName)
+refseq_keys <- exp_anno$SystematicName[refseq_indices]
+
+if (length(refseq_keys) > 0) {
+  refseq_symbols <- mapIds(org.Hs.eg.db,
+                           keys = refseq_keys,
+                           column = "SYMBOL",
+                           keytype = "REFSEQ",
+                           multiVals = "first")
+  exp_anno$Gene.Symbol[refseq_indices] <- refseq_symbols
+}
+
+# --- 5. Pass 2: Translate Ensembl (ENST) IDs ---
+enst_indices <- grep("^ENST", exp_anno$SystematicName)
+enst_keys <- exp_anno$SystematicName[enst_indices]
+
+if (length(enst_keys) > 0) {
+  enst_symbols <- mapIds(org.Hs.eg.db,
+                         keys = enst_keys,
+                         column = "SYMBOL",
+                         keytype = "ENSEMBLTRANS",
+                         multiVals = "first")
+  exp_anno$Gene.Symbol[enst_indices] <- enst_symbols
+}
+
+# --- 6. Verify the mapping (in the dictionary) ---
+print("Gene symbol mapping (NA vs. Mapped):")
+table(is.na(exp_anno$Gene.Symbol)) 
+# This should now show TRUE (controls) and FALSE (mapped genes)
+
+# --- 7. THIS IS THE FIX: Copy the gene symbols to deg_results ---
+# The rows match, so we just copy the column directly.
+deg_results$Gene.Symbol <- exp_anno$Gene.Symbol
+```
+```{r}
+# --- 1. Merge the two final tables ---
+#final_results <- merge(dmp_results, deg_results, by = "Gene.Symbol")
+
+# --- 2. Check your final, combined table! ---
+#print("Merge successful! Final results:")
+#head(final_results)
+
+# This will show you how many genes were matched!
+#dim(final_results)
+```
+```{r}
+# --- 1. PREPARE METHYLATION TABLE ---
+
+# Get the dictionary
+meth_anno <- getAnnotation(mset_filtered)
+
+# Add gene symbols to dmp_results
+dmp_results_adjusted$Gene.Symbol <- meth_anno[match(rownames(dmp_results_adjusted), rownames(meth_anno)), "UCSC_RefGene_Name"]
+
+# Clean the gene symbols (e.g., "GENE1;GENE2" -> "GENE1")
+dmp_results_adjusted$Gene.Symbol <- sapply(strsplit(dmp_results_adjusted$Gene.Symbol, ";"), `[`, 1)
+
+# --- NEW CLEANING STEP ---
+# Ensure it's a character vector
+dmp_results_adjusted$Gene.Symbol <- as.character(dmp_results_adjusted$Gene.Symbol)
+# Remove rows where Gene.Symbol is NA or an empty string
+dmp_results_adjusted <- dmp_results_adjusted[!is.na(dmp_results_adjusted$Gene.Symbol) & dmp_results_adjusted$Gene.Symbol != "", ]
+
+# Verify
+print("Methylation data prepared. First 5 gene symbols:")
+head(dmp_results_adjusted$Gene.Symbol, 5)
+print(paste("Number of rows after cleaning:", nrow(dmp_results_adjusted)))
+```
+```{r}
+# --- 2. PREPARE EXPRESSION TABLE ---
+
+# Install (if needed) and load the libraries
+if (!requireNamespace("AnnotationDbi", quietly = TRUE)) BiocManager::install("AnnotationDbi")
+if (!requireNamespace("org.Hs.eg.db", quietly = TRUE)) BiocManager::install("org.Hs.eg.db")
+library(AnnotationDbi)
+library(org.Hs.eg.db)
+
+# Get Dictionary 1
+exp_anno <- rgset_exp$genes
+
+# Add SystematicName column
+# Match rownames(deg_results) to rownames(exp_anno) if they don't match
+# Assuming they are in the same order based on previous steps:
+deg_results$SystematicName <- exp_anno$SystematicName
+
+# Create an empty column to hold our translations
+deg_results$Gene.Symbol <- NA
+
+# Pass 1: Translate RefSeq (NM_) IDs
+refseq_indices <- grep("^NM_", deg_results$SystematicName)
+refseq_keys <- deg_results$SystematicName[refseq_indices]
+if (length(refseq_keys) > 0) {
+  refseq_symbols <- mapIds(org.Hs.eg.db, keys = refseq_keys, column = "SYMBOL", keytype = "REFSEQ", multiVals = "first")
+  deg_results$Gene.Symbol[refseq_indices] <- refseq_symbols
+}
+
+# Pass 2: Translate Ensembl (ENST) IDs
+enst_indices <- grep("^ENST", deg_results$SystematicName)
+enst_keys <- deg_results$SystematicName[enst_indices]
+if (length(enst_keys) > 0) {
+  enst_symbols <- mapIds(org.Hs.eg.db, keys = enst_keys, column = "SYMBOL", keytype = "ENSEMBLTRANS", multiVals = "first")
+  deg_results$Gene.Symbol[enst_indices] <- enst_symbols
+}
+
+# --- NEW CLEANING STEP ---
+# Ensure it's a character vector
+deg_results$Gene.Symbol <- as.character(deg_results$Gene.Symbol)
+# Remove rows where Gene.Symbol is NA or an empty string
+deg_results <- deg_results[!is.na(deg_results$Gene.Symbol) & deg_results$Gene.Symbol != "", ]
+
+
+# Verify
+print("Expression data prepared. (NA vs. Mapped):")
+table(is.na(deg_results$Gene.Symbol)) # Should now show only FALSE
+print(paste("Number of rows after cleaning:", nrow(deg_results)))
+```
+```{r}
+# --- 3. MERGE ---
+
+final_results <- merge(dmp_results_adjusted, deg_results, by = "Gene.Symbol")
+
+print("Merge successful! Final results:")
+head(final_results)
+dim(final_results)
+```
+```{r}
+# Get the unique gene symbols from the 'Gene.Symbol' column
+unique_genes <- unique(final_results$Gene.Symbol)
+
+# Print the first few unique gene symbols
+head(unique_genes)
+
+# See how many unique genes were found
+length(unique_genes)
+```
+```{r}
+# Define your significance threshold
+alpha <- 0.05
+
+# Filter the final_results table
+significant_both <- final_results[final_results$adj.P.Val.x < alpha &   # Methylation significance
+                                 final_results$adj.P.Val.y < alpha, ]  # Expression significance
+
+# --- View the results ---
+
+# See the table of genes significant in BOTH
+head(significant_both)
+
+# See how many unique genes met both significance criteria
+num_significant_genes <- length(unique(significant_both$Gene.Symbol))
+print(paste("Number of unique genes significantly changed in both methylation and expression:", 
+            num_significant_genes))
+```
+so there are 7 genes that are both differentially expressed and differentially methylated.
+
+Now let us see which genes are diff meth and if there is a correlation in their expressions
+
+```{r}
+# --- 1. Filter for Significant DMPs ---
+# We use the adjusted p-value from the methylation analysis (.x)
+alpha <- 0.05
+significant_dmps <- dmp_results_adjusted[dmp_results_adjusted$adj.P.Val < alpha, ]
+
+# --- 2. Get Unique Gene Symbols ---
+# We use the cleaned 'Gene.Symbol' column we created earlier
+unique_dmg_symbols <- unique(significant_dmps$Gene.Symbol)
+
+# --- 3. Print the Count ---
+print(paste("Number of unique genes with at least one significant DMP:", 
+            length(unique_dmg_symbols)))
+```
+```{r}
+head(unique_dmg_symbols)
+```
+
+```{r}
+# --- 1. Define your significance threshold ---
+alpha <- 0.05
+
+# --- 2. Filter the deg_results table for significance ---
+# We use the adjusted p-value column
+significant_degs <- deg_results[deg_results$adj.P.Val < alpha, ]
+
+# --- 3. Get the unique gene symbols from the significant list ---
+# Make sure the 'Gene.Symbol' column exists and is populated
+unique_significant_genes <- unique(significant_degs$Gene.Symbol)
+
+# --- 4. Remove any potential NA values from the count ---
+# (NA symbols shouldn't be counted as significant genes)
+unique_significant_genes <- unique_significant_genes[!is.na(unique_significant_genes)]
+
+# --- 5. Print the final count ---
+print(paste("Number of unique genes significantly differentially expressed (adj.P.Val <", alpha, "):", 
+            length(unique_significant_genes)))
+```
+```{r}
+confounding_check_exp <- table(full_targets_exp$Group, full_targets_exp$BatchID)
+
+print(confounding_check_exp)
+```
+
+```{r}
+library(pheatmap)
+
+# 1. Get the top 5 most variable probes (same as your code)
+probe_variances <- apply(betavalues, 1, var)
+top_probes <- names(sort(probe_variances, decreasing = TRUE))[1:5]
+top_data <- betavalues[top_probes, ]
+
+# 2. Create the annotation data frame
+# This pulls the 'Group' column you created for the methylation data
+annotation_df <- data.frame(Group = full_targets_meth$Group)
+
+# 3. Set rownames for the annotation to match the data's colnames
+# This matches "GSM1588341_..." with the "Group"
+rownames(annotation_df) <- basename(full_targets_meth$Basename)
+
+# 4. Plot the heatmap
+pheatmap(top_data,
+         main = "Heatmap of Top 5 Variable Probes",
+         annotation_col = annotation_df,  # Adds the color bar
+         show_colnames = FALSE,           # Hides the messy GSM labels
+         show_rownames = TRUE)
+```
+
+```{r}
+library(ggplot2)
+library(tidyr)
+
+# 1. Get the top 5 significant probes from your dmp_results
+# (Make sure dmp_results is sorted by adj.P.Val, which topTable does)
+top_5_dmp_probes <- rownames(dmp_results_adjusted)[1:5]
+
+# 2. Get the Beta values for these 5 probes
+top_5_dmp_data <- betavalues[top_5_dmp_probes, ]
+
+# 3. Reshape the data for ggplot
+plot_data_dmp <- as.data.frame(top_5_dmp_data) %>%
+  tibble::rownames_to_column("Probe") %>%
+  pivot_longer(cols = -Probe, names_to = "Sample_ID", values_to = "Methylation")
+
+# 4. Add Group information
+plot_data_dmp$Group <- full_targets_meth$Group[match(plot_data_dmp$Sample_ID, rownames(annotation_df))]
+
+# 5. Add Gene Symbols
+plot_data_dmp$Gene.Symbol <- dmp_results[plot_data_dmp$Probe, "Gene.Symbol"]
+plot_data_dmp$PlotTitle <- paste(plot_data_dmp$Gene.Symbol, " (", plot_data_dmp$Probe, ")", sep="")
+
+# 6. Plot!
+ggplot(plot_data_dmp, aes(x = Group, y = Methylation, fill = Group)) +
+  geom_boxplot() +
+  geom_jitter(width = 0.1, alpha = 0.5) +
+  facet_wrap(~ PlotTitle, scales = "free_y") + # Makes 5 separate plots
+  ggtitle("Top 5 Differentially Methylated Probes") +
+  theme_minimal()
+```
+```{r}
+library(ggplot2)
+library(tidyr)
+library(tibble) # For rownames_to_column
+
+# --- 1. Get the top 5 significant probe indices ---
+top_5_deg_probes_char <- deg_results$Probe[1:5]
+top_5_deg_probes_num <- as.numeric(top_5_deg_probes_char)
+
+# --- 2. Get the Expression values ---
+top_5_deg_data <- expression_matrix[top_5_deg_probes_num, ]
+rownames(top_5_deg_data) <- top_5_deg_probes_char
+
+# --- 3. Reshape the data for ggplot ---
+plot_data_deg <- as.data.frame(top_5_deg_data) %>%
+  rownames_to_column("Probe") %>%
+  pivot_longer(cols = -Probe, names_to = "Sample_ID", values_to = "Expression")
+
+# --- 4. Create Group map (THIS IS THE FIX) ---
+# We use sub() to remove the ".gz" from the end of the Sample_ID
+sample_group_map <- data.frame(
+  Sample_ID = sub("\\.gz$", "", basename(full_targets_exp$supplementary_file)),
+  Group = targets_exp$Group
+)
+
+# --- 5. Add Group information (This merge will now work) ---
+plot_data_deg <- merge(plot_data_deg, sample_group_map, by.x = "Sample_ID", by.y = "Sample_ID")
+plot_data_deg$Group <- ifelse(plot_data_deg$Group == "asthma: TRUE", "Asthma", "Control")
+
+# --- 6. Add Gene Symbols ---
+plot_data_deg$Gene.Symbol <- deg_results[plot_data_deg$Probe, "Gene.Symbol"]
+plot_data_deg$PlotTitle <- paste(plot_data_deg$Gene.Symbol, " (Probe:", plot_data_deg$Probe, ")", sep="")
+
+# --- 7. Plot! ---
+ggplot(plot_data_deg, aes(x = Group, y = Expression, fill = Group)) +
+  geom_boxplot() +
+  geom_jitter(width = 0.1, alpha = 0.5) +
+  facet_wrap(~ PlotTitle, scales = "free_y") +
+  ggtitle("Top 5 Differentially Expressed Genes") +
+  theme_minimal()
+```
+
+```{r}
+library(ggplot2)
+library(ggrepel) # Load the ggrepel package
+library(dplyr)     # Load dplyr for the 'mutate' function
+
+# --- 1. Define thresholds for labeling ---
+# We'll label probes that are significant AND have a large M-value difference
+# You can adjust these numbers to get more or fewer labels
+pval_threshold_meth <- 0.05
+mvalue_fold_change_threshold <- 1.0 # (This is a 1.0 M-value change)
+
+# --- 2. Create the 'label' column ---
+# This adds a new column to dmp_results_adjusted.
+# It will contain the Gene.Symbol *only* for the outlier probes.
+dmp_results_labeled <- dmp_results_adjusted %>%
+  mutate(label = ifelse(adj.P.Val < pval_threshold_meth & abs(logFC) > mvalue_fold_change_threshold, 
+                        Gene.Symbol, 
+                        NA))
+
+# --- 3. Plot ---
+ggplot(dmp_results_labeled, aes(x = logFC, y = -log10(adj.P.Val))) +
+  geom_point(aes(color = Significant), alpha = 0.4, size = 1.5) +
+  scale_color_manual(values = c("No" = "grey", "Yes" = "red")) +
+  
+  # --- THIS IS THE NEW PART ---
+  geom_text_repel(aes(label = label), 
+                  na.rm = TRUE, 
+                  size = 3, 
+                  max.overlaps = 15, # Increase if labels still overlap too much
+                  box.padding = 0.5) +
+  # ----------------------------
+  
+  ggtitle("Volcano Plot: Differentially Methylated Probes (DMPs)") +
+  xlab("Log2 Fold Change (M-value difference)") +
+  ylab("-log10(Adjusted P-value)") +
+  theme_minimal()
+
+# --- 2. Volcano Plot for Expression ---
+# Create a column to highlight significant genes
+
+pval_threshold <- 0.05
+fold_change_threshold <- 3 # You can make this number bigger or smaller
+
+# --- 2. Create the 'label' column ---
+# This adds a new column to deg_results.
+# It will contain the Gene.Symbol *only* for the outlier genes.
+deg_results_labeled <- deg_results %>%
+  mutate(label = ifelse(adj.P.Val < pval_threshold & abs(logFC) > fold_change_threshold, 
+                        Gene.Symbol, 
+                        NA))
+
+# deg_results$Significant <- ifelse(deg_results$adj.P.Val < 0.05, "Yes", "No")
+
+ggplot(deg_results_labeled, aes(x = logFC, y = -log10(adj.P.Val), color = Significant)) +
+  geom_point(alpha = 0.4, size = 1.5) +
+  scale_color_manual(values = c("No" = "grey", "Yes" = "blue")) +
+  geom_text_repel(aes(label = label), 
+                  na.rm = TRUE, 
+                  size = 3, 
+                  max.overlaps = 15,
+                  box.padding = 0.5) +
+  ggtitle("Volcano Plot: Differentially Expressed Genes (DEGs)") +
+  xlab("Log2 Fold Change (Expression)") +
+  ylab("-log10(Adjusted P-value)") +
+  theme_minimal()
+```
+```{r}
+# --- 1. Define the paper's key genes ---
+key_genes <- c("ALOX15", "CAPN14", "POSTN", "HLA-DPA1")
+
+# --- 2. Get your significant gene lists ---
+# (Re-running from your Rmd, but just getting the gene list)
+sig_dmps_genes <- unique(dmp_results[dmp_results_adjusted$adj.P.Val < 0.05, "Gene.Symbol"])
+sig_degs_genes <- unique(deg_results[deg_results$adj.P.Val < 0.05, "Gene.Symbol"])
+
+# --- 3. Check for overlap ---
+print("Checking for prominent genes in YOUR significant lists:")
+
+print("--- In Differentially Methylated Genes (DMGs) ---")
+print(key_genes[key_genes %in% sig_dmps_genes])
+
+print("--- In Differentially Expressed Genes (DEGs) ---")
+print(key_genes[key_genes %in% sig_degs_genes])
+```
+```{r}
+print(sig_degs_genes)
+```
+```{r}
+if (!require("pheatmap", quietly = TRUE))
+  install.packages("pheatmap")
+if (!require("dplyr", quietly = TRUE))
+  install.packages("dplyr")
+library(pheatmap)
+library(dplyr)
+library(tibble)
+
+# --- 1. Define your list of genes ---
+genes_of_interest <- c("LDLRAD3", "ATXN7L1", "METTL1", "PCSK6") 
+
+# --- 2. Get probe annotations ---
+all_probe_data <- getAnnotation(mset_filtered)
+all_probe_data$Clean_Gene_Symbol <- sapply(strsplit(all_probe_data$UCSC_RefGene_Name, ";"), `[`, 1)
+
+# --- 3. Find the single most variable probe for each gene ---
+all_found_probes <- all_probe_data[which(all_probe_data$Clean_Gene_Symbol %in% genes_of_interest), ]
+
+if (nrow(all_found_probes) > 0) {
+  probe_variances <- apply(betavalues[rownames(all_found_probes), ], 1, var)
+  all_found_probes$Variance <- probe_variances
+  all_found_probes$Probe <- rownames(all_found_probes)
+  
+  top_probe_per_gene <- all_found_probes %>%
+    as.data.frame() %>%
+    group_by(Clean_Gene_Symbol) %>%
+    slice_max(order_by = Variance, n = 1) %>%
+    ungroup()
+
+  probes_to_plot <- top_probe_per_gene$Probe
+  
+  # --- 4. Extract the data for these specific probes ---
+  top_data_unordered <- betavalues[probes_to_plot, ] 
+  
+  # --- 5. Create the column annotation (Asthma vs Control) ---
+  annotation_df <- data.frame(Group = full_targets_meth$Group)
+  rownames(annotation_df) <- basename(full_targets_meth$Basename)
+  
+  # --- 6. (NEW) Order the samples by Group ---
+  # Get the new order (e.g., all "Asthma" first, then "Control")
+  ordered_samples <- annotation_df %>%
+    arrange(Group) %>% # Sorts the data frame by Group
+    rownames()         # Gets the sample names in the new order
+    
+  # Reorder the columns of your data matrix to match
+  top_data <- top_data_unordered[, ordered_samples]
+  
+  # --- 7. (NEW) Create readable row labels ---
+  readable_labels <- paste(top_probe_per_gene$Clean_Gene_Symbol, " (", top_probe_per_gene$Probe, ")", sep="")
+  rownames(top_data) <- readable_labels
+  
+  # --- 8. Plot the heatmap (with clustering OFF for columns) ---
+  pheatmap(top_data,
+           main = "Heatmap of Most Variable Probe per Gene",
+           annotation_col = annotation_df,
+           show_colnames = FALSE,
+           show_rownames = TRUE,
+           fontsize_row = 10,
+           cluster_cols = FALSE) # <-- THIS IS THE KEY CHANGE
+
+} else {
+  print("No probes were found for the specified genes. Cannot create heatmap.")
+}
+```
+```{r}
+if (!require("ggplot2", quietly = TRUE)) install.packages("ggplot2")
+if (!require("tidyr", quietly = TRUE)) install.packages("tidyr")
+if (!require("dplyr", quietly = TRUE)) install.packages("dplyr")
+if (!require("tibble", quietly = TRUE)) install.packages("tibble")
+library(ggplot2)
+library(tidyr)
+library(dplyr)
+library(tibble)
+
+# --- 1. DEFINE YOUR GENE LIST ---
+genes_to_plot <- c("ALOX15")
+
+# --- 2. Get/Clean Annotation ---
+all_probe_data <- getAnnotation(mset_filtered)
+all_probe_data$Clean_Gene_Symbol <- sapply(strsplit(all_probe_data$UCSC_RefGene_Name, ";"), `[`, 1)
+
+# --- 3. Find all probes for these genes ---
+probes_to_plot_meth <- rownames(all_probe_data[which(all_probe_data$Clean_Gene_Symbol %in% genes_to_plot), ])
+
+if (length(probes_to_plot_meth) == 0) {
+  print("No methylation probes found for the specified genes.")
+} else {
+  # --- 4. Get the methylation data ---
+  meth_data <- betavalues[probes_to_plot_meth, , drop = FALSE]
+
+  # --- 5. Reshape data for ggplot ---
+  plot_data_meth <- as.data.frame(meth_data) %>%
+    rownames_to_column("Probe") %>%
+    pivot_longer(cols = -Probe, names_to = "Sample_ID_long", values_to = "Methylation")
+
+  # --- 6. Add Group information ---
+  # (Assumes full_targets_meth$Group and full_targets_meth$Basename exist)
+  annotation_df <- data.frame(Group = full_targets_meth$Group,
+                              Sample_ID_long = basename(full_targets_meth$Basename))
+  plot_data_meth <- merge(plot_data_meth, annotation_df, by.x = "Sample_ID_long", by.y = "Sample_ID_long")
+  
+  # --- 7. Add Gene Symbol for plotting ---
+  plot_data_meth$Gene.Symbol <- all_probe_data[plot_data_meth$Probe, "Clean_Gene_Symbol"]
+  plot_data_meth$PlotTitle <- paste(plot_data_meth$Gene.Symbol, " (", plot_data_meth$Probe, ")", sep="")
+  
+  # --- 8. Plot ---
+  ggplot(plot_data_meth, aes(x = Group, y = Methylation, fill = Group)) +
+    geom_boxplot() +
+    geom_jitter(width = 0.1, alpha = 0.5) +
+    facet_wrap(~ PlotTitle, scales = "free_y") + # Creates a separate plot for each probe
+    ggtitle("Methylation for Genes of Interest") +
+    theme_minimal()
+}
+```
+```{r}
+if (!require("ggplot2", quietly = TRUE)) install.packages("ggplot2")
+if (!require("tidyr", quietly = TRUE)) install.packages("tidyr")
+if (!require("dplyr", quietly = TRUE)) install.packages("dplyr")
+if (!require("tibble", quietly = TRUE)) install.packages("tibble")
+library(ggplot2)
+library(tidyr)
+library(dplyr)
+library(tibble)
+
+# --- 1. DEFINE YOUR GENE LIST ---
+# (This can be the same or different from the methylation list)
+genes_to_plot <- c("PSMC3IP")
+
+# --- 2. Find all probes for these genes ---
+# (Assumes deg_results is annotated with 'Gene.Symbol' and 'Probe')
+probes_to_plot_exp <- deg_results[which(deg_results$Gene.Symbol %in% genes_to_plot), ]
+
+if (nrow(probes_to_plot_exp) == 0) {
+  print("No expression probes found for these genes (or 'deg_results' is not annotated).")
+} else {
+  # --- 3. Get the expression data ---
+  # Convert character row indices (e.g., "54991") to numbers
+  probes_num <- as.numeric(probes_to_plot_exp$Probe)
+  exp_data <- expression_matrix[probes_num, , drop = FALSE]
+  
+  # Add the probe IDs back as rownames
+  rownames(exp_data) <- probes_to_plot_exp$Probe
+
+  # --- 4. Reshape data for ggplot ---
+  plot_data_exp <- as.data.frame(exp_data) %>%
+    rownames_to_column("Probe") %>%
+    pivot_longer(cols = -Probe, names_to = "Sample_ID", values_to = "Expression")
+
+  # --- 5. Add Group information ---
+  # (This map was created in a previous step, ensures .gz is removed)
+  sample_group_map <- data.frame(
+    Sample_ID = sub("\\.gz$", "", basename(full_targets_exp$supplementary_file)),
+    Group = targets_exp$Group
+  )
+  plot_data_exp <- merge(plot_data_exp, sample_group_map, by = "Sample_ID")
+  plot_data_exp$Group <- ifelse(plot_data_exp$Group == "asthma: TRUE", "Asthma", "Control")
+  
+  # --- 6. Add Gene Symbol for plotting ---
+  # Merge to get the gene symbols
+  plot_data_exp <- merge(plot_data_exp, probes_to_plot_exp[, c("Probe", "Gene.Symbol")], by = "Probe")
+  plot_data_exp$PlotTitle <- paste(plot_data_exp$Gene.Symbol, " (Probe:", plot_data_exp$Probe, ")", sep="")
+
+  # --- 7. Plot ---
+  ggplot(plot_data_exp, aes(x = Group, y = Expression, fill = Group)) +
+    geom_boxplot() +
+    geom_jitter(width = 0.1, alpha = 0.5) +
+    facet_wrap(~ PlotTitle, scales = "free_y") + # Creates a separate plot for each probe
+    ggtitle("Expression for Genes of Interest") +
+    theme_minimal()
+}
+```
+```{r}
+if (!require("ggplot2", quietly = TRUE)) install.packages("ggplot2")
+if (!require("tidyr", quietly = TRUE)) install.packages("tidyr")
+if (!require("dplyr", quietly = TRUE)) install.packages("dplyr")
+if (!require("tibble", quietly = TRUE)) install.packages("tibble")
+library(ggplot2)
+library(tidyr)
+library(dplyr)
+library(tibble)
+
+# --- 1. DEFINE YOUR GENE LIST ---
+genes_to_plot <- c("ALOX15") # Add any genes you like
+
+# --- 2. Find all probes for these genes ---
+# (Assumes deg_results is annotated with 'Gene.Symbol' and 'Probe')
+all_probes_for_genes <- deg_results[which(deg_results$Gene.Symbol %in% genes_to_plot), ]
+
+if (nrow(all_probes_for_genes) == 0) {
+  print("No expression probes found for these genes (or 'deg_results' is not annotated).")
+} else {
+  
+  # --- 3. Calculate Variance for these probes ---
+  # Get numeric indices
+  probes_num <- as.numeric(all_probes_for_genes$Probe)
+  
+  # Calculate variance for each probe across all samples
+  all_probes_for_genes$Variance <- apply(expression_matrix[probes_num, ], 1, var)
+  
+  # --- 4. Select the single most variable probe per gene ---
+  top_probe_per_gene_exp <- all_probes_for_genes %>%
+    group_by(Gene.Symbol) %>%
+    slice_max(order_by = Variance, n = 1) %>%
+    ungroup()
+  
+  print("Plotting the single most variable probe for each gene:")
+  print(top_probe_per_gene_exp[, c("Gene.Symbol", "Probe", "Variance")])
+
+  # --- 5. Get the expression data ---
+  probes_num_final <- as.numeric(top_probe_per_gene_exp$Probe)
+  exp_data <- expression_matrix[probes_num_final, , drop = FALSE]
+  rownames(exp_data) <- top_probe_per_gene_exp$Probe
+
+  # --- 6. Reshape data for ggplot ---
+  plot_data_exp <- as.data.frame(exp_data) %>%
+    rownames_to_column("Probe") %>%
+    pivot_longer(cols = -Probe, names_to = "Sample_ID", values_to = "Expression")
+
+  # --- 7. Add Group information ---
+  sample_group_map <- data.frame(
+    Sample_ID = sub("\\.gz$", "", basename(full_targets_exp$supplementary_file)),
+    Group = targets_exp$Group
+  )
+  plot_data_exp <- merge(plot_data_exp, sample_group_map, by = "Sample_ID")
+  plot_data_exp$Group <- ifelse(plot_data_exp$Group == "asthma: TRUE", "Asthma", "Control")
+  
+  # --- 8. Add Gene Symbol for plotting ---
+  plot_data_exp <- merge(plot_data_exp, top_probe_per_gene_exp[, c("Probe", "Gene.Symbol")], by = "Probe")
+  plot_data_exp$PlotTitle <- paste(plot_data_exp$Gene.Symbol, " (Probe:", plot_data_exp$Probe, ")", sep="")
+
+  # --- 9. Plot ---
+  ggplot(plot_data_exp, aes(x = Group, y = Expression, fill = Group)) +
+    geom_boxplot() +
+    geom_jitter(width = 0.1, alpha = 0.5) +
+    facet_wrap(~ PlotTitle, scales = "free_y") +
+    ggtitle("Expression for Genes of Interest") +
+    theme_minimal()
+}
+```
+```{r}
+if (!require("ggplot2", quietly = TRUE)) install.packages("ggplot2")
+if (!require("tidyr", quietly = TRUE)) install.packages("tidyr")
+if (!require("dplyr", quietly = TRUE)) install.packages("dplyr")
+if (!require("tibble", quietly = TRUE)) install.packages("tibble")
+library(ggplot2)
+library(tidyr)
+library(dplyr)
+library(tibble)
+
+# --- 1. DEFINE YOUR GENE LIST ---
+genes_to_plot_meth <- c("POSTN") # Add any genes you like
+
+# --- 2. Get/Clean Annotation ---
+all_probe_data <- getAnnotation(mset_filtered)
+all_probe_data$Clean_Gene_Symbol <- sapply(strsplit(all_probe_data$UCSC_RefGene_Name, ";"), `[`, 1)
+
+# --- 3. Find all probes for these genes ---
+all_probes_for_genes_meth <- all_probe_data[which(all_probe_data$Clean_Gene_Symbol %in% genes_to_plot_meth), ]
+
+if (nrow(all_probes_for_genes_meth) == 0) {
+  print("No methylation probes found for the specified genes.")
+} else {
+
+  # --- 4. Calculate Variance for these probes ---
+  probe_variances_meth <- apply(betavalues[rownames(all_probes_for_genes_meth), ], 1, var)
+  all_probes_for_genes_meth$Variance <- probe_variances_meth
+  all_probes_for_genes_meth$Probe <- rownames(all_probes_for_genes_meth)
+  
+  # --- 5. Select the single most variable probe per gene ---
+  top_probe_per_gene_meth <- all_probes_for_genes_meth %>%
+    as.data.frame() %>%
+    group_by(Clean_Gene_Symbol) %>%
+    slice_max(order_by = Variance, n = 1) %>%
+    ungroup()
+    
+  print("Plotting the single most variable methylation probe for each gene:")
+  print(top_probe_per_gene_meth[, c("Clean_Gene_Symbol", "Probe", "Variance")])
+  
+  # --- 6. Get the methylation data ---
+  meth_data <- betavalues[top_probe_per_gene_meth$Probe, , drop = FALSE]
+
+  # --- 7. Reshape data for ggplot ---
+  plot_data_meth <- as.data.frame(meth_data) %>%
+    rownames_to_column("Probe") %>%
+    pivot_longer(cols = -Probe, names_to = "Sample_ID_long", values_to = "Methylation")
+
+  # --- 8. Add Group information ---
+  # (Assumes full_targets_meth$Group and full_targets_meth$Basename exist)
+  annotation_df <- data.frame(Group = full_targets_meth$Group,
+                              Sample_ID_long = basename(full_targets_meth$Basename))
+  plot_data_meth <- merge(plot_data_meth, annotation_df, by.x = "Sample_ID_long", by.y = "Sample_ID_long")
+  
+  # --- 9. Add Gene Symbol for plotting ---
+  plot_data_meth <- merge(plot_data_meth, top_probe_per_gene_meth[, c("Probe", "Clean_Gene_Symbol")], by = "Probe")
+  plot_data_meth$PlotTitle <- paste(plot_data_meth$Clean_Gene_Symbol, " (", plot_data_meth$Probe, ")", sep="")
+  
+  # --- 10. Plot ---
+  ggplot(plot_data_meth, aes(x = Group, y = Methylation, fill = Group)) +
+    geom_boxplot() +
+    geom_jitter(width = 0.1, alpha = 0.5) +
+    facet_wrap(~ PlotTitle, scales = "free_y") + # Creates a separate plot for each probe
+    ggtitle("Methylation for Genes of Interest (Most Variable Probe)") +
+    theme_minimal()
+}
+```
+```{r}
+# --- 1. Make sure Group and BatchID columns exist ---
+# (You created these in a previous chunk)
+group_col_exp <- "characteristics_ch1" 
+full_targets_exp$Group <- ifelse(full_targets_exp[[group_col_exp]] == "asthma: TRUE", "Asthma", "Control")
+
+file_basenames <- basename(as.character(full_targets_exp$supplementary_file))
+full_targets_exp$BatchID <- as.factor(sapply(strsplit(file_basenames, "_"), `[`, 2))
+
+# --- 2. This is the critical diagnostic command ---
+print("Checking for confounding in Expression data:")
+confounding_check_exp <- table(full_targets_exp$Group, full_targets_exp$BatchID)
+print(confounding_check_exp)
+```
+```{r}
+if (!require("ggrepel", quietly = TRUE))
+  install.packages("ggrepel")
+library(ggplot2)
+library(ggrepel) # Load the new package
+library(dplyr)     # Load dplyr for the 'mutate' function
+
+# --- 1. Define thresholds for labeling ---
+# We'll label genes that are significant AND have a large fold change
+pval_threshold <- 0.05
+fold_change_threshold <- 3 # You can make this number bigger or smaller
+
+# --- 2. Create the 'label' column ---
+# This adds a new column to deg_results.
+# It will contain the Gene.Symbol *only* for the outlier genes.
+deg_results_labeled <- deg_results %>%
+  mutate(label = ifelse(adj.P.Val < pval_threshold & abs(logFC) > fold_change_threshold, 
+                        Gene.Symbol, 
+                        NA))
+
+# --- 3. Plot ---
+ggplot(deg_results_labeled, aes(x = logFC, y = -log10(adj.P.Val))) +
+  geom_point(aes(color = Significant), alpha = 0.4, size = 1.5) +
+  scale_color_manual(values = c("No" = "grey", "Yes" = "blue")) +
+  
+  # --- THIS IS THE NEW PART ---
+  geom_text_repel(aes(label = label), 
+                  na.rm = TRUE, 
+                  size = 3, 
+                  max.overlaps = 15,
+                  box.padding = 0.5) +
+  # ----------------------------
+  
+  ggtitle("Volcano Plot: Differentially Expressed Genes (DEGs)") +
+  xlab("Log2 Fold Change (Expression)") +
+  ylab("-log10(Adjusted P-value)") +
+  theme_minimal()
+```
+```{r}
+library(ggplot2)
+library(dplyr)
+library(tibble)
+
+# --- 1. Get Group Information ---
+# Get the "Asthma" and "Control" sample IDs (column names)
+# (Assumes full_targets_exp$Group exists from the limma chunk)
+control_samples <- colnames(expression_matrix)[full_targets_exp$Group == "Control"]
+asthma_samples <- colnames(expression_matrix)[full_targets_exp$Group == "Asthma"]
+
+# --- 2. Calculate Average Expression for Each Group ---
+# We calculate the mean for each gene (row)
+avg_control <- rowMeans(expression_matrix[, control_samples])
+avg_asthma <- rowMeans(expression_matrix[, asthma_samples])
+
+# --- 3. Create a Data Frame for Plotting ---
+# Combine the averages with your limma results (deg_results)
+# The row names of deg_results are the indices ("54991", "1408", etc.)
+plot_data_fig2a <- data.frame(
+  Probe = rownames(deg_results),
+  Avg_Control = avg_control[as.numeric(rownames(deg_results))],
+  Avg_Asthma = avg_asthma[as.numeric(rownames(deg_results))]
+)
+
+# Merge with deg_results to get significance, fold change, and gene symbols
+plot_data_fig2a <- merge(plot_data_fig2a, 
+                         deg_results[, c("Probe", "logFC", "adj.P.Val", "Gene.Symbol", "Significant")],
+                         by = "Probe")
+
+# --- 4. Plot using ggplot2 ---
+ggplot(plot_data_fig2a, aes(x = Avg_Control, y = Avg_Asthma)) +
+  # Add points, colored by significance
+  geom_point(aes(color = Significant, size = abs(logFC)), alpha = 0.5) +
+  
+  # Set colors (blue for significant, grey for not)
+  scale_color_manual(values = c("No" = "grey", "Yes" = "blue")) +
+  
+  # Set size based on Fold Change (like the paper)
+  scale_size(range = c(0.5, 4)) + # Adjust min/max size as needed
+  
+  # Add a 45-degree line (where x=y, meaning no change)
+  geom_abline(intercept = 0, slope = 1, li netype = "dashed", color = "red") +
+  
+  # Labels and Title
+  ggtitle("Gene Expression: Asthma vs. Control") +
+  xlab("Average Expression (Control)") +
+  ylab("Average Expression (Asthma)") +
+  theme_minimal() +
+  labs(color = "Significant", size = "abs(logFC)")
+```
+```{r}
+library(ggplot2)
+library(dplyr)
+library(tibble)
+if (!require("ggrepel", quietly = TRUE)) # Install ggrepel if not present
+  install.packages("ggrepel")
+library(ggrepel) # Load the ggrepel package
+
+# --- 1. Get Group Information ---
+control_samples <- colnames(expression_matrix)[full_targets_exp$Group == "Control"]
+asthma_samples <- colnames(expression_matrix)[full_targets_exp$Group == "Asthma"]
+
+# --- 2. Calculate Average Expression for Each Group ---
+avg_control <- rowMeans(expression_matrix[, control_samples])
+avg_asthma <- rowMeans(expression_matrix[, asthma_samples])
+
+# --- 3. Create a Data Frame for Plotting ---
+plot_data_fig2a <- data.frame(
+  Probe = rownames(deg_results),
+  Avg_Control = avg_control[as.numeric(rownames(deg_results))],
+  Avg_Asthma = avg_asthma[as.numeric(rownames(deg_results))]
+)
+plot_data_fig2a <- merge(plot_data_fig2a, 
+                         deg_results[, c("Probe", "logFC", "adj.P.Val", "Gene.Symbol", "Significant")],
+                         by = "Probe")
+
+# --- 4. Create the 'label' column (NEW STEP) ---
+# This adds a new column that is NA for non-significant genes
+# and the Gene.Symbol for significant ones.
+plot_data_fig2a <- plot_data_fig2a %>%
+  mutate(label = ifelse(Significant == "Yes", Gene.Symbol, NA))
+
+# --- 5. Plot using ggplot2 (with ggrepel) ---
+ggplot(plot_data_fig2a, aes(x = Avg_Control, y = Avg_Asthma)) +
+  # Add points, colored by significance
+  geom_point(aes(color = Significant, size = abs(logFC)), alpha = 0.5) +
+  
+  # Set colors (blue for significant, grey for not)
+  scale_color_manual(values = c("No" = "grey", "Yes" = "blue")) +
+  
+  # Set size based on Fold Change
+  scale_size(range = c(0.5, 4)) +
+  
+  # Add a 45-degree line
+  geom_abline(intercept = 0, slope = 1, linetype = "dashed", color = "red") +
+  
+  # --- THIS IS THE NEW PART ---
+  # Add labels for the significant points
+  geom_text_repel(aes(label = label), 
+                  na.rm = TRUE, 
+                  size = 3, 
+                  max.overlaps = 15, # Tries to prevent labels from overlapping
+                  box.padding = 0.5) +
+  # ----------------------------
+
+  # Labels and Title
+  ggtitle("Gene Expression: Asthma vs. Control") +
+  xlab("Average Expression (Control)") +
+  ylab("Average Expression (Asthma)") +
+  theme_minimal() +
+  labs(color = "Significant", size = "abs(logFC)")
+```
+
