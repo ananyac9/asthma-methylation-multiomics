@@ -1,0 +1,170 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+This is an [R Markdown](http://rmarkdown.rstudio.com) Notebook. When you execute code within the notebook, the results appear beneath the code. 
+
+Try executing this chunk by clicking the *Run* button within the chunk or by placing your cursor inside it and pressing *Ctrl+Shift+Enter*. 
+
+```{r}
+plot(cars)
+```
+
+Add a new chunk by clicking the *Insert Chunk* button on the toolbar or by pressing *Ctrl+Alt+I*.
+
+When you save the notebook, an HTML file containing the code and output will be saved alongside it (click the *Preview* button or press *Ctrl+Shift+K* to preview the HTML file).
+
+The preview shows you a rendered HTML copy of the contents of the editor. Consequently, unlike *Knit*, *Preview* does not run any R code chunks. Instead, the output of the chunk when it was last run in the editor is displayed.
+install BiocManager, minfi, GEOquery, limma, IlluminaHumanMethylation450kmanifest
+```{r}
+gse_meth <- getGEO("GSE65163")
+full_targets_meth <- pData(gse_meth[[1]])
+baseDir <- "C:/Users/anany/Downloads/GSE65163_RAW/"
+```
+```{r}
+colnames(full_targets_meth)
+```
+```{r}
+head(full_targets_meth$supplementary_file.1)
+```
+```{r}
+full_targets_meth$Basename <- basename(full_targets_meth$supplementary_file.1)
+full_targets_meth$Basename <- sub("_Red\\.idat\\.gz$", "", full_targets_meth$Basename)
+full_targets_meth$Basename <- file.path(baseDir, full_targets_meth$Basename)
+
+head(full_targets_meth$Basename)
+```
+```{r}
+rgset_meth <- read.metharray.exp(targets = full_targets_meth)
+print(rgset_meth)
+```
+```{r}
+mset <- preprocessSWAN(rgset_meth)
+
+mset_genomic <- mapToGenome(mset)
+
+mset_filtered <- dropLociWithSnps(mset_genomic)
+```
+```{r}
+qc <- getQC(mset)
+plotQC(qc)
+```
+```{r}
+mvalues <- getM(mset_filtered)
+print(mvalues)
+
+betavalues <- getBeta(mset_filtered)
+print(betavalues)
+```
+```{r}
+gse_exp <- getGEO("GSE65204")
+full_targets_exp <- pData(gse_exp[[1]])
+
+baseDir_exp <- "C:/Users/anany/Downloads/GSE65204_RAW"
+```
+```{r}
+colnames(full_targets_exp)
+```
+```{r}
+head(full_targets_exp$supplementary_file)
+```
+```{r}
+head(full_targets_exp$characteristics_ch1)
+```
+```{r}
+targets_exp <- data.frame(
+FileName = basename(as.character(full_targets_exp$supplementary_file)),
+Group = full_targets_exp$characteristics_ch1
+)
+```
+```{r}
+head(targets_exp)
+```
+```{r}
+rgset_exp <- read.maimages(targets_exp, path = baseDir_exp, source = "agilent", columns = list(E = "gProcessedSignal"))
+print(rgset_exp)
+```
+```{r}
+eb <- backgroundCorrect(rgset_exp, method = "normexp")
+```
+```{r}
+normalized_data <- normalizeBetweenArrays(eb, method = "quantile")
+print(normalized_data)
+```
+```{r}
+expression_matrix <- normalized_data$E
+head(expression_matrix[1:5])
+```
+```{r}
+if (!require("pheatmap", quietly = TRUE))
+install.packages("pheatmap")
+library(pheatmap)
+
+probe_variances <- apply(betavalues, 1, var)
+top_probes <- names(sort(probe_variances, decreasing = TRUE))[1:5]
+top_data <- betavalues[top_probes, ]
+pheatmap(top_data,
+main = "Heatmap of Top 5 Variable Methylation Probes",
+show_rownames = FALSE)
+if (!require("ggplot2", quietly = TRUE))
+install.packages("ggplot2")
+library(ggplot2)
+all_probe_data <- getAnnotation(mset_filtered)
+alox15_probes <- all_probe_data[grep("ALOX15", all_probe_data$UCSC_RefGene_Name), ]
+```
+```{r}
+if (!require("ggplot2", quietly = TRUE))
+install.packages("ggplot2")
+library(ggplot2)
+all_probe_data <- getAnnotation(mset_filtered)
+alox15_probes <- all_probe_data[grep("ALOX15", all_probe_data$UCSC_RefGene_Name), ]
+print(alox15_probes)
+probe_of_interest <- "cg12786765"
+
+plot_df <- data.frame(
+Sample = colnames(betavalues),
+Methylation = betavalues[probe_of_interest, ],
+Group = full_targets_meth$characteristics_ch1.1
+)
+plot_df$Group <- ifelse(plot_df$Group == "asthma: TRUE", "Asthma", "Control")
+ggplot(plot_df, aes(x = Group, y = Methylation, fill = Group)) +
+geom_boxplot() +
+geom_jitter(width = 0.1) + # Adds the individual data points
+ggtitle(paste("Methylation for", probe_of_interest, "(ALOX15)")) +
+theme_minimal()
+```
+
+```{r}
+all_annotations <- getAnnotation(mset_filtered)
+head(all_annotations)
+```
+```{r}
+group_column_name <- "characteristics_ch1.1" 
+
+# Create the new 'Group' column in the full_targets_meth data frame
+full_targets_meth$Group <- ifelse(full_targets_meth[[group_column_name]] == "asthma: TRUE", 
+                                "Asthma", "Control")
+
+# --- Verify that it worked ---
+print("Verification of methylation groups:")
+table(full_targets_meth$Group)
+```
+
+
+```{r}
+design <- model.matrix(~ 0 + Group, data = full_targets_meth)
+colnames(design) <- c("Asthma", "Control") # Clean up names
+
+contrast.matrix <- makeContrasts(Asthma - Control, levels = design)
+
+fit <- lmFit(mvalues, design)
+fit2 <- contrasts.fit(fit, contrast.matrix)
+fit2 <- eBayes(fit2)
+
+dmp_results <- topTable(fit2, n = Inf)
+```
+```{r}
+head(dmp_results)
+```
+

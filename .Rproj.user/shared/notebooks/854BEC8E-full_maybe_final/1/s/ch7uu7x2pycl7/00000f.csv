@@ -1,0 +1,4 @@
+"0","gse_exp <- getGEO(""GSE65204"")"
+"0","full_targets_exp <- pData(gse_exp[[1]])"
+"0",""
+"0","baseDir_exp <- ""C:/Users/anany/Downloads/GSE65204_RAW"""

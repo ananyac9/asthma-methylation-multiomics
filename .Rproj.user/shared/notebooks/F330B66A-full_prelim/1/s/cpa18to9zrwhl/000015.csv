@@ -1,0 +1,6 @@
+"0","probe_variances <- apply(betavalues, 1, var)"
+"0","top_probes <- names(sort(probe_variances, decreasing = TRUE))[1:5]"
+"0","top_data <- betavalues[top_probes, ]"
+"0","pheatmap(top_data, "
+"0","         main = ""Heatmap of Top 50 Variable Methylation Probes"","
+"0","         show_rownames = FALSE)"

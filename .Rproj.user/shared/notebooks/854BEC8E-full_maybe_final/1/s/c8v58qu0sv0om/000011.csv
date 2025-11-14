@@ -1,0 +1,5 @@
+"0","mset <- preprocessSWAN(rgset_meth)"
+"0",""
+"0","mset_genomic <- mapToGenome(mset)"
+"0",""
+"0","mset_filtered <- dropLociWithSnps(mset_genomic)"

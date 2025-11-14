@@ -1,0 +1,5 @@
+"0","if (!require(""ggplot2"", quietly = TRUE))"
+"0","install.packages(""ggplot2"")"
+"0","library(ggplot2)"
+"0","all_probe_data <- getAnnotation(mset_filtered)"
+"0","alox15_probes <- all_probe_data[grep(""ALOX15"", all_probe_data$UCSC_RefGene_Name), ]"

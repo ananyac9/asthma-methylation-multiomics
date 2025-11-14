@@ -1,0 +1,2 @@
+"0","qc <- getQC(mset)"
+"0","plotQC(qc)"
