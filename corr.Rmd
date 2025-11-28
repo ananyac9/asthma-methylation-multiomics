@@ -1,0 +1,405 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+This is an [R Markdown](http://rmarkdown.rstudio.com) Notebook. When you execute code within the notebook, the results appear beneath the code. 
+
+Try executing this chunk by clicking the *Run* button within the chunk or by placing your cursor inside it and pressing *Ctrl+Shift+Enter*. 
+
+```{r}
+
+library(GEOquery)
+
+# This will create a directory "GSE85567" in your working dir
+getGEOSuppFiles("GSE85567", makeDirectory = TRUE)
+
+# See what got downloaded
+list.files("GSE85567")
+
+
+
+```
+
+
+```{r}
+
+############################################################
+## STEP 0: Load libs
+############################################################
+
+suppressPackageStartupMessages({
+  library(GEOquery)
+  library(Biobase)
+  library(dplyr)
+  library(stringr)
+})
+
+############################################################
+## STEP 1: Load methylation subseries (GSE85566)
+############################################################
+
+gse_meth_list <- getGEO("GSE85566", GSEMatrix = TRUE)
+gse_meth <- gse_meth_list[[1]]
+
+beta_mat   <- exprs(gse_meth)         # CpGs x GSM_meth
+pheno_meth <- pData(gse_meth)
+
+cat("STEP 1: Methylation data\n")
+cat("  beta_mat dim (CpGs x samples):", dim(beta_mat), "\n")
+cat("  pheno_meth dim:", dim(pheno_meth), "\n\n")
+
+# Expect:
+#   beta_mat dim: ~ (4–5e5 CpGs, 115 samples)
+#   pheno_meth dim: (115, many columns)
+
+############################################################
+## STEP 2: Extract subject / pair_id from methylation titles
+############################################################
+
+extract_pair_id <- function(x) sub(".*_(\\w+_\\w+)$", "\\1", x)
+
+pheno_meth$pair_id <- extract_pair_id(pheno_meth$title)
+
+cat("STEP 2: Pair IDs from methylation\n")
+cat("  Unique pair IDs in pheno_meth:", length(unique(pheno_meth$pair_id)), "\n")
+cat("  First 5 titles and pair_ids:\n")
+print(head(pheno_meth[, c("title", "pair_id")], 5))
+cat("\n")
+
+# Expect:
+#   titles like "AEC methylation data_0447_47e4"
+#   pair_id like "0447_47e4"
+
+
+
+```
+```{r}
+
+############################################################
+## STEP 3: Load RNA-seq normalized counts like in your .Rmd
+############################################################
+
+# Adjust the path if needed; this mirrors your Rmd exactly.
+counts_file <- "Asthma_Analysis/GSE85567_RNASeq_normalizedcounts.txt.gz"
+
+gene_counts <- read.table(
+  counts_file,
+  header       = TRUE,
+  row.names    = 1,    # first column = gene ID
+  check.names  = FALSE # keep sample IDs as-is (important)
+)
+
+cat("STEP 3: RNA-seq normalized counts (gene_counts)\n")
+cat("  gene_counts dim (genes x samples):", dim(gene_counts), "\n")
+cat("  First 5 rownames (genes):\n")
+print(head(rownames(gene_counts), 5))
+cat("\n  First 5 column names (sample IDs; should be '502d_4e7d', etc.):\n")
+print(colnames(gene_counts)[1:5])
+cat("\n")
+
+# EXPECTATION:
+#   gene_counts dim: 16535 x 85   (or similar: 16535 genes, 85 samples)
+#   first 5 rownames: some gene ID (could be ENSEMBL, could be symbols)
+#   first 5 colnames: "502d_4e7d" "2239_4ef1" ... (those random-looking codes)
+#
+# If you still see 16535 x 1 here, something is wrong with:
+#   - the path (different file)
+#   - or the file's actual format (send me head(readLines(counts_file, 3)))
+
+
+############################################################
+## STEP 4: Check that RNA-seq columns are the same "pair_id" codes
+############################################################
+
+pair_ids_meth <- unique(pheno_meth$pair_id)
+pair_ids_expr <- colnames(gene_counts)
+
+overlap_ids <- intersect(pair_ids_meth, pair_ids_expr)
+
+cat("STEP 4: Overlap between methylation pair_id and RNA-seq columns\n")
+cat("  # pair_ids in methylation:", length(pair_ids_meth), "\n")
+cat("  # pair_ids in RNA-seq:", length(pair_ids_expr), "\n")
+cat("  # overlapping pair_ids:", length(overlap_ids), "\n")
+cat("  First 10 overlapping pair_ids:\n")
+print(head(overlap_ids, 10))
+cat("\n")
+
+# EXPECTATION (per paper):
+#   methylation subjects ~115
+#   RNA-seq subjects    ~85
+#   overlap_ids         ~81
+# If overlap_ids is 0, we’ve mis-read one of the files or mis-parsed pair_id.
+
+############################################################
+## STEP 5: Restrict to overlapping subjects and align matrices
+############################################################
+
+# 5a. For methylation: map GSM_meth -> pair_id
+map_meth <- data.frame(
+  GSM_meth = rownames(pheno_meth),
+  pair_id  = pheno_meth$pair_id,
+  stringsAsFactors = FALSE
+)
+
+# Keep only overlapping IDs
+map_meth_overlap <- map_meth[map_meth$pair_id %in% overlap_ids, ]
+
+# Order by pair_id to line up with expression columns later
+map_meth_overlap <- map_meth_overlap[order(map_meth_overlap$pair_id), ]
+
+# 5b. For RNA-seq counts: subset and order columns by the same sorted overlap_ids
+overlap_ids_sorted <- sort(overlap_ids)
+
+gene_counts_overlap <- gene_counts[, overlap_ids_sorted, drop = FALSE]
+
+cat("STEP 5: After restricting to overlapping subjects\n")
+cat("  gene_counts_overlap dim (genes x subjects):", dim(gene_counts_overlap), "\n")
+cat("  First 5 colnames of gene_counts_overlap:\n")
+print(colnames(gene_counts_overlap)[1:5])
+cat("  First 5 pair_ids in map_meth_overlap:\n")
+print(head(map_meth_overlap$pair_id, 5))
+cat("\n")
+
+# EXPECTATION:
+#   gene_counts_overlap: 16535 x 81 (or similar)
+#   gene_counts_overlap colnames: sorted pair_ids
+#   map_meth_overlap$pair_id: same sorted list (should visually match)
+
+############################################################
+## STEP 6: Subset methylation beta matrix to the same overlapping subjects
+############################################################
+
+# For each pair_id in overlap_ids_sorted, pick the corresponding GSM_meth
+gsm_for_overlap <- sapply(
+  overlap_ids_sorted,
+  function(pid) {
+    # there should be exactly one GSM_meth per pair_id
+    vals <- map_meth_overlap$GSM_meth[map_meth_overlap$pair_id == pid]
+    if (length(vals) == 0) return(NA)
+    vals[1]
+  }
+)
+
+# Sanity check: no NAs
+cat("STEP 6: GSM lookup sanity\n")
+cat("  Any NA in gsm_for_overlap? ", any(is.na(gsm_for_overlap)), "\n")
+cat("  First 5 GSM_meth for overlapping pair_ids:\n")
+print(head(gsm_for_overlap, 5))
+cat("\n")
+
+# Subset beta matrix to those GSMs, in the same order as overlap_ids_sorted
+beta_overlap <- beta_mat[, gsm_for_overlap, drop = FALSE]
+
+# Rename columns of beta_overlap to pair_id to match gene_counts_overlap
+colnames(beta_overlap) <- overlap_ids_sorted
+
+cat("  beta_overlap dim (CpGs x subjects):", dim(beta_overlap), "\n")
+cat("  First 5 colnames of beta_overlap:\n")
+print(colnames(beta_overlap)[1:5])
+cat("\n")
+
+# EXPECTATION:
+#   beta_overlap: (many CpGs) x 81 subjects
+#   colnames(beta_overlap) identical to colnames(gene_counts_overlap)
+
+############################################################
+## STEP 7: DEBUG — check ORMDL3 presence (if symbols used)
+############################################################
+
+cat("STEP 7: Try to locate ORMDL3 in gene_counts_overlap rownames\n")
+ormdl3_hits <- grep("^ORMDL3$", rownames(gene_counts_overlap), ignore.case = FALSE, value = TRUE)
+print(ormdl3_hits)
+
+if (length(ormdl3_hits) == 0) {
+  cat("\nNo exact 'ORMDL3' rowname. Showing first 10 gene IDs instead:\n")
+  print(head(rownames(gene_counts_overlap), 10))
+  cat("\nIf these are ENSEMBL IDs, we’ll need the gene annotation file to map ORMDL3 -> ENSEMBL ID.\n")
+} else {
+  cat("\nFound ORMDL3 in rownames:\n")
+  print(ormdl3_hits)
+}
+
+############################################################
+## END OF DEBUG BLOCK
+############################################################
+
+# Once this all looks sane:
+#  - gene_counts_overlap and beta_overlap share columns (pair_ids)
+#  - you know how ORMDL3 is encoded (symbol vs ENSEMBL),
+# you can plug in:
+#
+#   expr_vec <- as.numeric(gene_counts_overlap["ORMDL3", ])
+#   meth_vec <- as.numeric(beta_overlap["cg05616858", ])
+#
+# and build df for modelling.
+############################################################
+
+```
+
+
+```{r}
+
+############################################################
+## STEP 8: Map Ensembl IDs -> gene symbols, locate ORMDL3
+############################################################
+
+suppressPackageStartupMessages(library(org.Hs.eg.db))
+
+# Ensembl IDs (trim to 15 chars in case there are version suffixes)
+ens_ids <- substr(rownames(gene_counts_overlap), 1, 15)
+
+cat("STEP 8: Mapping Ensembl IDs to SYMBOL using org.Hs.eg.db\n")
+cat("  Number of Ensembl IDs:", length(ens_ids), "\n")
+
+symbols <- mapIds(
+  org.Hs.eg.db,
+  keys     = ens_ids,
+  keytype  = "ENSEMBL",
+  column   = "SYMBOL",
+  multiVals = "first"
+)
+
+cat("  SYMBOL vector length:", length(symbols), "\n")
+cat("  # NA symbols:", sum(is.na(symbols)), "\n")
+cat("  First 10 symbol mappings:\n")
+print(head(symbols, 10))
+cat("\n")
+
+# Where is ORMDL3?
+orm_rows <- which(symbols == "ORMDL3")
+cat("  # rows where SYMBOL == 'ORMDL3':", length(orm_rows), "\n")
+
+if (length(orm_rows) == 0) {
+  cat("\nNo ORMDL3 found in SYMBOLs. Showing any rows where 'ORMDL3' appears in SYMBOL (case-insensitive):\n")
+  any_hits <- grep("ORMDL3", symbols, ignore.case = TRUE)
+  print(any_hits)
+  if (length(any_hits) > 0) {
+    print(symbols[any_hits])
+    print(rownames(gene_counts_overlap)[any_hits])
+  }
+  stop("Cannot find ORMDL3 in mapped symbols; check the output above.")
+}
+
+# If multiple rows map to ORMDL3, just use the first for now
+ormdl3_index   <- orm_rows[1]
+ormdl3_ens_id  <- rownames(gene_counts_overlap)[ormdl3_index]
+
+cat("\nUsing Ensembl ID for ORMDL3:\n")
+cat("  index:", ormdl3_index, "\n")
+cat("  Ensembl rowname:", ormdl3_ens_id, "\n")
+cat("  SYMBOL:", symbols[ormdl3_index], "\n\n")
+
+############################################################
+## STEP 9: Extract ORMDL3 expression and CpG methylation
+############################################################
+
+# Choose a CpG (replace with what you actually care about)
+cpg_id <- "cg05616858"  # example; change if needed
+
+cat("STEP 9: Extracting expression and methylation\n")
+cat("  Checking that CpG", cpg_id, "exists in beta_overlap rownames...\n")
+if (!(cpg_id %in% rownames(beta_overlap))) {
+  cat("  CpG not found. First 10 CpGs:\n")
+  print(head(rownames(beta_overlap), 10))
+  stop(paste("CpG", cpg_id, "not found in beta_overlap."))
+}
+
+# Expression vector: ORMDL3 across the 81 subjects (columns = pair IDs)
+expr_vec <- as.numeric(gene_counts_overlap[ormdl3_ens_id, ])
+names(expr_vec) <- colnames(gene_counts_overlap)
+
+# Methylation vector: that CpG across the same 81 subjects (columns are same pair IDs)
+meth_vec <- as.numeric(beta_overlap[cpg_id, ])
+names(meth_vec) <- colnames(beta_overlap)
+
+cat("  Length(expr_vec):", length(expr_vec), "\n")
+cat("  Length(meth_vec):", length(meth_vec), "\n")
+cat("  First 5 expr values:\n")
+print(head(expr_vec, 5))
+cat("  First 5 meth values:\n")
+print(head(meth_vec, 5))
+cat("\n")
+
+############################################################
+## STEP 10: Build modelling dataframe + confounders and run LM
+############################################################
+
+# gsm_for_overlap: named by pair_id; we created it earlier
+#   names(gsm_for_overlap) == overlap_ids_sorted == colnames(gene_counts_overlap)
+
+cat("STEP 10: Building modelling dataframe with confounders\n")
+cat("  Any NA in gsm_for_overlap? ", any(is.na(gsm_for_overlap)), "\n\n")
+
+# For each pair_id (colname), find methylation GSM row in pheno_meth
+pair_ids <- colnames(gene_counts_overlap)
+gsm_vec  <- gsm_for_overlap[pair_ids]
+
+if (any(is.na(gsm_vec))) {
+  cat("  WARNING: Some GSMs are NA. Showing first few:\n")
+  print(head(gsm_vec))
+  stop("GSM lookup failed for some subjects.")
+}
+
+ph_sub <- pheno_meth[gsm_vec, , drop = FALSE]
+
+cat("  ph_sub dim:", dim(ph_sub), "\n")
+cat("  ph_sub first 5 rownames (GSM):\n")
+print(head(rownames(ph_sub), 5))
+cat("\n  Available pheno_meth columns (first 20):\n")
+print(colnames(ph_sub)[1:min(20, ncol(ph_sub))])
+cat("\n")
+
+# Heuristic extraction of confounders from ph_sub
+age_col <- grep("age", colnames(ph_sub), ignore.case = TRUE, value = TRUE)[1]
+sex_col <- grep("gender|sex", colnames(ph_sub), ignore.case = TRUE, value = TRUE)[1]
+eth_col <- grep("ethnicity", colnames(ph_sub), ignore.case = TRUE, value = TRUE)[1]
+dis_col <- grep("disease.*status|asthma", colnames(ph_sub), ignore.case = TRUE, value = TRUE)[1]
+
+cat("  Selected confounder columns:\n")
+cat("    age_col:", age_col, "\n")
+cat("    sex_col:", sex_col, "\n")
+cat("    eth_col:", eth_col, "\n")
+cat("    dis_col:", dis_col, "\n\n")
+
+# Build dataframe
+df <- data.frame(
+  pair_id        = pair_ids,
+  expr           = expr_vec[pair_ids],
+  meth           = meth_vec[pair_ids],
+  age            = if (!is.na(age_col)) suppressWarnings(as.numeric(ph_sub[[age_col]])) else NA,
+  sex            = if (!is.na(sex_col)) as.factor(ph_sub[[sex_col]]) else NA,
+  ethnicity      = if (!is.na(eth_col)) as.factor(ph_sub[[eth_col]]) else NA,
+  disease_status = if (!is.na(dis_col)) as.factor(ph_sub[[dis_col]]) else NA,
+  stringsAsFactors = FALSE
+)
+
+cat("  Summary of expr / meth / age:\n")
+print(summary(df[, c("expr", "meth", "age")]))
+cat("\n  First 5 rows of df:\n")
+print(head(df, 5))
+cat("\n")
+
+# Drop rows with missing values for the model
+df_lm <- na.omit(df)
+
+cat("  df_lm dim (after dropping NAs):", dim(df_lm), "\n")
+cat("  disease_status levels:\n")
+print(levels(df_lm$disease_status))
+cat("\n")
+
+# Ensure factors are factors
+df_lm$sex            <- factor(df_lm$sex)
+df_lm$ethnicity      <- factor(df_lm$ethnicity)
+df_lm$disease_status <- factor(df_lm$disease_status)
+
+cat("  Final model formula: expr ~ meth + age + sex + ethnicity + disease_status\n\n")
+
+fit_lm <- lm(expr ~ meth + age + sex + ethnicity + disease_status, data = df_lm)
+
+cat("===== Linear model results: ORMDL3 expression ~ CpG methylation + confounders =====\n")
+print(summary(fit_lm))
+cat("===============================================================================\n")
+
+
+```
