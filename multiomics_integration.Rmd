@@ -1,0 +1,2908 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+This is an [R Markdown](http://rmarkdown.rstudio.com) Notebook. When you execute code within the notebook, the results appear beneath the code.
+
+Try executing this chunk by clicking the *Run* button within the chunk or by placing your cursor inside it and pressing *Ctrl+Shift+Enter*.
+
+```{r}
+plot(cars)
+```
+
+Add a new chunk by clicking the *Insert Chunk* button on the toolbar or by pressing *Ctrl+Alt+I*.
+
+When you save the notebook, an HTML file containing the code and output will be saved alongside it (click the *Preview* button or press *Ctrl+Shift+K* to preview the HTML file).
+
+The preview shows you a rendered HTML copy of the contents of the editor. Consequently, unlike *Knit*, *Preview* does not run any R code chunks. Instead, the output of the chunk when it was last run in the editor is displayed.
+
+```{r message=FALSE, warning=FALSE}
+
+if (!requireNamespace("BiocManager", quietly = TRUE))
+    install.packages("BiocManager")
+
+# List of required packages
+packages <- c("GEOquery", "minfi", "limma", "IlluminaHumanMethylation450kanno.ilmn12.hg19", "edgeR", "RUVSeq")
+
+# Install packages that are not already installed
+for (pkg in packages) {
+    if (!require(pkg, character.only = TRUE)) {
+        BiocManager::install(pkg)
+    }
+}
+
+```
+
+```{r}
+
+# Load all required libraries
+library(GEOquery)
+library(tidyverse)
+library(edgeR)
+library(RUVSeq)
+
+# Load the raw gene counts
+gene_counts <- read.table("C:/Users/anany/Downloads/GSE85567_RNASeq_normalizedcounts.txt/GSE85567_RNASeq_normalizedcounts.txt", header = TRUE, row.names = 1)
+
+# Load the clinical metadata for the RNA-seq experiment
+gse_expr <- getGEO(filename="C:/Users/anany/Downloads/GSE85567_series_matrix.txt/GSE85567_series_matrix.txt", getGPL = FALSE)
+pheno_data <- pData(gse_expr)
+
+# --- DEBUG CHECK 1 ---
+cat("--- DEBUG 1: Initial Data Dimensions ---\n")
+cat("Raw gene counts dimensions:", dim(gene_counts), "\n")
+cat("Clinical metadata dimensions:", dim(pheno_data), "\n\n")
+
+```
+
+```{r message=FALSE, warning=FALSE}
+
+# 1. Load required libraries
+library(GEOquery)
+library(tidyverse)
+library(stringr)
+library(scales) # Added for p-value formatting
+
+# 2. Load the GEO dataset from the local file
+# Ensure the file path is correct for your system
+gse <- getGEO(filename="C:/Users/anany/Downloads/GSE85568-GPL13534_series_matrix.txt/GSE85568-GPL13534_series_matrix.txt")
+
+# 3. Extract the clinical metadata (phenotype data)
+pheno_data <- pData(gse)
+
+# 4. Extract the methylation beta values
+beta_values <- exprs(gse)
+
+# 5. Tidy the clinical data
+pheno_data_clean <- pheno_data %>%
+  dplyr::select(geo_accession, `disease status:ch1`) %>%
+  rename(sample_id = geo_accession, disease_status = `disease status:ch1`) %>%
+  mutate(disease_status = str_remove(disease_status, "disease status: "))
+
+# 6. Isolate the methylation data for our target CpG site
+cpg_site <- "cg11303839"
+cpg_data <- as.data.frame(t(beta_values[cpg_site, , drop = FALSE])) %>%
+  rownames_to_column(var = "sample_id")
+colnames(cpg_data)[2] <- "methylation_beta"
+
+# 7. Merge the clinical data with the specific CpG methylation data
+merged_data <- inner_join(pheno_data_clean, cpg_data, by = "sample_id")
+
+# 8. Create labels with sample counts
+sample_counts <- table(merged_data$disease_status)
+merged_data$disease_status_n <- factor(
+  merged_data$disease_status,
+  levels = c("Control", "Asthma"),
+  labels = c(
+    paste0("Control\n(n=", sample_counts["Control"], ")"),
+    paste0("Asthma\n(n=", sample_counts["Asthma"], ")")
+  )
+)
+
+# --- THIS IS THE CORRECTED SECTION ---
+
+# 9. Perform a t-test to calculate the actual p-value
+t_test_result <- t.test(methylation_beta ~ disease_status, data = merged_data)
+p_value <- t_test_result$p.value
+
+# 10. Format the p-value into a string for plotting (e.g., "P = 2.43e-15")
+# The gsub function formats it nicely for use with parse=TRUE
+p_value_string <- gsub(
+  "e", "*x*10^",
+  scales::scientific(p_value, digits = 3)
+)
+p_label <- paste0("italic(P) == ", p_value_string)
+
+
+# 11. Generate the plot without the line and with the calculated p-value
+figure_1c_updated <- ggplot(merged_data, aes(x = disease_status_n, y = methylation_beta)) +
+  geom_boxplot(outlier.shape = NA, width = 0.5) +
+  geom_jitter(aes(color = disease_status), width = 0.25, size = 2, alpha = 0.7) +
+  scale_color_manual(values = c("Control" = "black", "Asthma" = "red")) +
+  labs(
+    x = NULL,
+    y = expression(paste("cg11303839 methylation (", beta, ")"))
+  ) +
+  # Add the dynamically calculated p-value as text
+  annotate(
+    "text",
+    x = 1.5, y = 0.7,  # Adjusted y-position to be clear of data
+    label = p_label,
+    parse = TRUE,      # parse=TRUE interprets the math expression
+    size = 4.5
+  ) +
+  # The annotate("segment", ...) line has been removed
+  theme_classic(base_size = 14) +
+  theme(
+    legend.position = "none",
+    axis.text.x = element_text(size = 12, lineheight = 1.1),
+    axis.title.y = element_text(size = 12)
+  )
+
+# 12. Display the plot
+print(figure_1c_updated)
+
+```
+
+```{r}
+
+# 1. Load required libraries
+# Make sure limma is installed via BiocManager
+library(GEOquery)
+library(tidyverse)
+library(stringr)
+library(limma)
+
+# 2. Load the GEO dataset from the local file
+gse <- getGEO(filename="C:/Users/anany/Downloads/GSE85568-GPL13534_series_matrix.txt/GSE85568-GPL13534_series_matrix.txt")
+
+# 3. Extract methylation and clinical data
+beta_values <- exprs(gse)
+pheno_data <- pData(gse)
+
+# 4. Clean and prepare clinical data for the model
+pheno_clean <- tibble(
+    # 1. Create the 'sample_id' column from the row names
+    sample_id = rownames(pheno_data),
+    
+    # 2. Directly access the other columns you need
+    disease_status = pheno_data$`disease status:ch1`,
+    age = pheno_data$`age:ch1`,
+    gender = pheno_data$`gender:ch1`,
+    ethnicity = pheno_data$`ethnicity:ch1`
+) %>%
+  mutate(
+    # Now, clean up the values in each column
+    disease_status = str_remove(disease_status, "disease status: "),
+    age = as.numeric(str_remove(age, "age: ")),
+    gender = str_remove(gender, "gender: "),
+    ethnicity = str_remove(ethnicity, "ethnicity: "),
+    
+    # Convert character columns to factors for the model
+    across(c(disease_status, gender, ethnicity), as.factor)
+  )
+
+# Ensure the "Control" group is the baseline reference level
+pheno_clean$disease_status <- relevel(pheno_clean$disease_status, ref = "Control")
+
+# 5. Define the statistical model
+# The model now adjusts for age, gender, and ethnicity
+design <- model.matrix(~ disease_status + age + gender + ethnicity, data = pheno_clean)
+
+# ... (Run Steps 1-5 from your previous code) ...
+
+# 5b. Convert Beta values to M-values for the linear model
+# M = log2(Beta / (1 - Beta))
+# We add a small offset (0.001) to avoid division by zero
+m_values <- log2((beta_values + 0.001) / (1 - beta_values + 0.001))
+
+# 6. Run limma on M-values (This gives the correct P-values)
+fit <- lmFit(m_values, design)
+fit <- eBayes(fit)
+results <- topTable(fit, coef = "disease_statusAsthma", number = Inf)
+
+# ... (Run Steps 1-6 from the previous code) ...
+
+# 7. Calculate Delta Beta manually for the X-axis
+# Use ORIGINAL beta_values to get the readable % change
+mean_asthma <- rowMeans(beta_values[, pheno_clean$disease_status == "Asthma"])
+mean_control <- rowMeans(beta_values[, pheno_clean$disease_status == "Control"])
+delta_beta <- mean_asthma - mean_control
+
+# ... (Run Steps 1-7 as before) ...
+
+# 8. Prepare results with the User's corrected 3-category logic
+results <- results %>%
+  rownames_to_column(var = "CpG_Site") %>%
+  mutate(
+    delta_beta = delta_beta[CpG_Site],
+    
+    # Strictly mutually exclusive categories based on your prompt
+    category = case_when(
+      adj.P.Val > 0.05 ~ "Non-Significant",
+      adj.P.Val <= 0.05 & abs(delta_beta) <= 0.05 ~ "Significant (Low FC)",
+      adj.P.Val <= 0.05 & abs(delta_beta) > 0.05 ~ "Significant (High FC)" 
+    )
+  )
+
+# 9. Generate the Corrected Volcano Plot
+figure_1a_replication <- ggplot(results, aes(x = delta_beta, y = -log10(P.Value), color = category)) +
+  geom_point(alpha = 0.6, size = 1) +
+  
+  # Map the categories to the paper's colors
+  scale_color_manual(values = c(
+    "Non-Significant" = "black",            # q > 0.05
+    "Significant (Low FC)" = "grey30",      # q < 0.05 & FC < 5% (Dark Gray)
+    "Significant (High FC)" = "grey70"      # q < 0.05 & FC > 5% (Light Gray)
+  )) +
+  
+  theme_classic(base_size = 14) +
+  labs(
+    x = "Mean Difference in Beta Values",
+    y = expression(-log[10]("P-value")),
+    title = "Differential Methylation (Asthma vs. Control)",
+    color = ""
+  ) +
+  
+  # Removed the dotted vertical lines as requested
+  theme(legend.position = "bottom")
+
+# 10. Display the plot
+print(figure_1a_replication)
+
+```
+
+```{r}
+
+# 1. Load required libraries
+library(tidyverse)
+library(IlluminaHumanMethylation450kanno.ilmn12.hg19)
+
+# --- Ensure the 'results' dataframe from the volcano plot analysis is in your environment ---
+
+# 2. Get CpG site annotation data
+cpg_locations <- getLocations(IlluminaHumanMethylation450kanno.ilmn12.hg19)
+cpg_locations_df <- as.data.frame(cpg_locations) %>%
+  rownames_to_column(var = "CpG_Site") %>%
+  # --- THIS IS THE FIX ---
+  # Explicitly call the rename function from the dplyr package
+  dplyr::rename(CHR = seqnames, BP = start) %>%
+  # -----------------------
+  mutate(CHR = str_remove(CHR, "chr")) %>%
+  filter(CHR %in% c(1:22, "X", "Y")) %>%
+  mutate(CHR = factor(CHR, levels = c(1:22, "X", "Y"))) %>%
+  drop_na(CHR, BP)
+
+# 3. Merge limma results with CpG locations
+manhattan_data <- inner_join(results, cpg_locations_df, by = "CpG_Site")
+
+# 4. Prepare data for ggplot (calculate cumulative positions)
+manhattan_data_ready <- manhattan_data %>%
+  group_by(CHR) %>%
+  summarise(chr_len = max(BP)) %>%
+  mutate(total_bp = cumsum(as.numeric(chr_len)) - chr_len) %>%
+  dplyr::select(-chr_len) %>%
+  left_join(manhattan_data, ., by = "CHR") %>%
+  arrange(CHR, BP) %>%
+  mutate(BP_cumulative = BP + total_bp)
+
+# 5. Find the midpoint of each chromosome for labeling the x-axis
+axis_labels <- manhattan_data_ready %>%
+  group_by(CHR) %>%
+  summarize(center = mean(BP_cumulative))
+
+# 6. Calculate the significance threshold line (FDR = 5%)
+threshold_p_value <- max(manhattan_data_ready$P.Value[manhattan_data_ready$adj.P.Val < 0.05])
+
+# 7. Generate the Manhattan Plot
+figure_1b_replication <- ggplot(manhattan_data_ready, aes(x = BP_cumulative, y = -log10(P.Value))) +
+  geom_point(aes(color = as.factor(CHR)), alpha = 0.7, size = 1) +
+  scale_color_manual(values = rep(c("grey40", "black"), 12)) +
+  geom_hline(yintercept = -log10(threshold_p_value), color = "red") +
+  scale_x_continuous(label = axis_labels$CHR, breaks = axis_labels$center) +
+  labs(x = "Chromosome", y = expression(-log[10]("P-value"))) +
+  theme_classic(base_size = 14) +
+  theme(legend.position = "none",
+        panel.grid.major.x = element_blank(),
+        panel.grid.minor.x = element_blank())
+
+# 8. Display the plot
+print(figure_1b_replication)
+
+```
+
+```{r}
+
+# 1. Load required libraries
+library(tidyverse)
+library(GEOquery)
+
+# --- PART 1: PREPARE METHYLATION DATA ---
+# This part is the same as the Figure 1C code.
+gse_meth <- getGEO(filename="C:/Users/anany/Downloads/GSE85568-GPL13534_series_matrix.txt/GSE85568-GPL13534_series_matrix.txt", getGPL = FALSE)
+pheno_meth <- pData(gse_meth)
+beta_values <- exprs(gse_meth)
+cpg_data <- as.data.frame(t(beta_values["cg11303839", , drop = FALSE])) %>%
+  rownames_to_column(var = "sample_id_gsm")
+pheno_meth_clean <- pheno_meth %>%
+  dplyr::select(geo_accession, `disease status:ch1`) %>%
+  rename(sample_id_gsm = geo_accession, disease_status = `disease status:ch1`) %>%
+  mutate(disease_status = str_remove(disease_status, "disease status: "))
+methylation_final <- inner_join(pheno_meth_clean, cpg_data, by = "sample_id_gsm")
+
+
+# --- PART 2: PREPARE EXPRESSION DATA ---
+# Load the normalized counts file
+normalized_counts <- read.table("C:/Users/anany/Downloads/GSE85567_RNASeq_normalizedcounts.txt/GSE85567_RNASeq_normalizedcounts.txt", header = TRUE, row.names = 1)
+log2_counts <- log2(normalized_counts + 1)
+# Replace with the correct Ensembl ID you found
+target_gene_id <- "ENSG00000006606" 
+ccl26_expression_raw <- as.data.frame(t(log2_counts[target_gene_id, , drop = FALSE])) %>%
+  rownames_to_column(var = "sample_id_expression")
+
+
+# --- PART 3: BUILD THE ID MAP FROM SAMPLE ORDER (THE FIX) ---
+# Load the clinical data for the RNA-seq experiment
+gse_expr <- getGEO(filename="C:/Users/anany/Downloads/GSE85567_series_matrix.txt/GSE85567_series_matrix.txt", getGPL = FALSE)
+pheno_expr <- pData(gse_expr)
+
+# Create the mapping table by assuming the order is the same
+id_map <- tibble(
+  # Get the weird IDs from the column names of the expression file
+  sample_id_expression = colnames(normalized_counts),
+  # Get the correct GSM IDs from the metadata file
+  sample_id_gsm = pheno_expr$geo_accession
+)
+
+# Use this new map to add the correct GSM IDs to our expression data
+ccl26_expression_mapped <- inner_join(id_map, ccl26_expression_raw, by = "sample_id_expression")
+
+
+# --- PART 4: FINAL MERGE AND PLOT ---
+# Join the methylation and expression data using the unified GSM IDs
+# This will now work correctly
+final_data_1d <- inner_join(methylation_final, ccl26_expression_mapped, by = "sample_id_gsm")
+
+# Generate the Scatter Plot
+figure_1d_replication <- ggplot(final_data_1d, aes(x = .data[[target_gene_id]], y = cg11303839)) +
+  geom_point(aes(color = disease_status), size = 2.5) +
+  geom_smooth(method = "lm", se = FALSE, color = "black", linetype = "dashed") +
+  scale_color_manual(values = c("Control" = "black", "Asthma" = "red")) +
+  theme_classic(base_size = 14) +
+  labs(
+    x = "CCL26 expression (log2 normalized counts)",
+    y = expression(paste("cg11303839 methylation (", beta, ")"))
+  ) +
+  annotate("text", x = 1.5, y = 0.55, label = "r = -0.23\nP = 0.039", hjust = 0, size = 4.5) +
+  theme(legend.position = "none")
+
+# Display the plot
+print(figure_1d_replication)
+
+```
+
+```{r}
+
+
+```
+
+```{r}
+
+# 1. Load All Required Libraries
+# -----------------------------
+library(GEOquery)
+library(tidyverse)
+library(edgeR)
+library(RUVSeq)
+
+
+# 2. Load Data
+# --------------
+# Load the raw gene counts
+gene_counts <- read.table("C:/Users/anany/Downloads/GSE85567_RNASeq_normalizedcounts.txt/GSE85567_RNASeq_normalizedcounts.txt", header = TRUE, row.names = 1)
+
+# Load the clinical metadata for the RNA-seq experiment
+gse_expr <- getGEO(filename="C:/Users/anany/Downloads/GSE85567_series_matrix.txt/GSE85567_series_matrix.txt", getGPL = FALSE)
+pheno_data <- pData(gse_expr)
+
+
+# 3. Prepare and Filter Data
+# --------------------------
+# Build a clean metadata table from scratch
+targets <- tibble(
+  sample_id = rownames(pheno_data), # The GSM IDs are the row names
+  group = pheno_data$"disease status:ch1" # Directly access the disease status column
+) %>%
+  mutate(group = str_remove(group, "disease status: ")) %>%
+  mutate(group = as.factor(group))
+
+# Map the weird column names in gene_counts to the correct sample IDs
+id_map <- tibble(
+  expression_col_name = colnames(gene_counts),
+  sample_id = targets$sample_id
+)
+colnames(gene_counts) <- id_map$sample_id
+
+# Create a DGEList object for edgeR
+dge <- DGEList(counts = gene_counts, group = targets$group)
+
+# Filter out genes with low counts
+keep <- filterByExpr(dge, min.count = 5, min.total.count = 10, min.prop = 0.1)
+dge <- dge[keep, , keep.lib.sizes=FALSE]
+
+
+# 4. Normalize with RUVSeq
+# ------------------------
+dge <- calcNormFactors(dge)
+logcpm <- cpm(dge, log=TRUE)
+gene_variances <- apply(logcpm, 1, var)
+empirical_controls <- names(sort(gene_variances))[1:floor(nrow(dge$counts) * 0.1)]
+ruv_results <- RUVg(dge$counts, empirical_controls, k=2)
+unwanted_factors <- as.data.frame(ruv_results$W)
+
+
+# 5. Run Differential Expression Analysis
+# ----------------------------------------
+# --- THIS IS THE FIX ---
+# Create a single dataframe containing ALL variables for the model
+model_data <- cbind(targets, unwanted_factors)
+
+# Create the design matrix from this new, complete dataframe
+design <- model.matrix(~ group + W_1 + W_2, data = model_data)
+
+```
+
+```{r}
+
+if (!require("BiocManager", quietly = TRUE))
+    install.packages("BiocManager")
+
+BiocManager::install("org.Hs.eg.db")
+
+# 5. Run Differential Expression Analysis
+# ----------------------------------------
+
+# Create the design matrix including the RUV factors (W_1, W_2)
+model_data <- cbind(targets, unwanted_factors)
+design <- model.matrix(~ group + W_1 + W_2, data = model_data)
+
+# --- THIS WAS MISSING ---
+
+# 1. Estimate Dispersion (Variance)
+# edgeR needs to know how "spread out" the data is before calculating p-values
+dge <- estimateDisp(dge, design)
+
+# 2. Fit the GLM (Generalized Linear Model)
+# This fits the curve to your data
+fit <- glmQLFit(dge, design)
+
+# 3. Perform the Test (Quasi-Likelihood F-Test)
+# coef=2 refers to the "group" column (Asthma vs Control). 
+# coef=1 is the intercept.
+qlf <- glmQLFTest(fit, coef=2)
+
+# ------------------------
+
+# Now Step 6 will work because 'qlf' exists
+
+# 6. View and Export the Results
+# -------------------------------
+# Load the annotation library
+library(org.Hs.eg.db)
+
+# Generate the full table of results for ALL genes, not just the top 20
+full_results_table <- topTags(qlf, n = Inf)$table
+
+# Add gene symbols as a new column for easier interpretation
+# The row names are Ensembl IDs without the version number
+full_results_table$symbol <- mapIds(org.Hs.eg.db,
+                                    keys = substr(rownames(full_results_table), 1, 15), # Removes .version from ID
+                                    column = "SYMBOL",
+                                    keytype = "ENSEMBL",
+                                    multiVals = "first")
+
+# --- DEBUG CHECK ---
+cat("--- Final Results Table (with gene symbols) ---\n")
+print(head(full_results_table))
+
+# Save the full results table to a CSV file in your project folder
+write.csv(full_results_table, file = "C:/Users/anany/Downloads/differential_expression_results.csv")
+
+cat("\n\n✅ Success! Full results saved to 'Asthma_Analysis/differential_expression_results.csv'\n")
+
+```
+
+```{r}
+
+# 1. Load All Required Libraries
+# -----------------------------
+library(GEOquery)
+library(tidyverse)
+library(edgeR)
+library(RUVSeq)
+library(org.Hs.eg.db) # For adding gene symbols
+
+
+# 2. Load Data
+# --------------
+# Load the raw gene counts
+gene_counts <- read.table("C:/Users/anany/Downloads/GSE85567_RNASeq_normalizedcounts.txt/GSE85567_RNASeq_normalizedcounts.txt", header = TRUE, row.names = 1)
+
+# Load the clinical metadata for the RNA-seq experiment
+gse_expr <- getGEO(filename="C:/Users/anany/Downloads/GSE85567_series_matrix.txt/GSE85567_series_matrix.txt", getGPL = FALSE)
+pheno_data <- pData(gse_expr)
+
+
+# 3. Prepare and Filter Data
+# --------------------------
+# Build a clean metadata table from scratch
+targets <- tibble(
+  sample_id = rownames(pheno_data), # The GSM IDs are the row names
+  group = pheno_data$"disease status:ch1" # Directly access the disease status column
+) %>%
+  mutate(group = str_remove(group, "disease status: ")) %>%
+  mutate(group = as.factor(group))
+
+# Map the weird column names in gene_counts to the correct sample IDs
+id_map <- tibble(
+  expression_col_name = colnames(gene_counts),
+  sample_id = targets$sample_id
+)
+colnames(gene_counts) <- id_map$sample_id
+
+# Create a DGEList object for edgeR
+dge <- DGEList(counts = gene_counts, group = targets$group)
+
+# Filter out genes with low counts
+keep <- filterByExpr(dge, min.count = 5, min.total.count = 10, min.prop = 0.1)
+dge <- dge[keep, , keep.lib.sizes=FALSE]
+
+
+# 4. Normalize with RUVSeq
+# ------------------------
+dge <- calcNormFactors(dge)
+logcpm <- cpm(dge, log=TRUE)
+gene_variances <- apply(logcpm, 1, var)
+empirical_controls <- names(sort(gene_variances))[1:floor(nrow(dge$counts) * 0.1)]
+ruv_results <- RUVg(dge$counts, empirical_controls, k=2)
+unwanted_factors <- as.data.frame(ruv_results$W)
+
+
+# 5. Run Differential Expression Analysis
+# ----------------------------------------
+# Create a single dataframe containing ALL variables for the model
+model_data <- cbind(targets, unwanted_factors)
+
+# Create the design matrix from this new, complete dataframe
+# Note: The column names from RUVg are V1 and V2
+design <- model.matrix(~ group + W_1 + W_2, data = model_data)
+
+# Run the edgeR GLM analysis
+dge <- estimateDisp(dge, design)
+fit <- glmQLFit(dge, design)
+
+# --- This is the line that CREATES the 'qlf' object ---
+qlf <- glmQLFTest(fit, coef="groupControl")
+
+
+# 6. View and Export the Results
+# -------------------------------
+# Now that 'qlf' exists, this part will work
+full_results_table <- topTags(qlf, n = Inf)$table
+
+# Add gene symbols as a new column for easier interpretation
+full_results_table$symbol <- mapIds(org.Hs.eg.db,
+                                    keys = substr(rownames(full_results_table), 1, 15),
+                                    column = "SYMBOL",
+                                    keytype = "ENSEMBL",
+                                    multiVals = "first")
+
+# Save the full results table to a CSV file
+write.csv(full_results_table, file = "C:/Users/anany/Downloads/differential_expression_results2 .csv")
+
+cat("\n\n✅ Success! Full results saved to 'Asthma_Analysis/differential_expression_results.csv'\n")
+
+```
+
+```{r}
+
+# 1. Load All Required Libraries
+# -----------------------------
+library(GEOquery)
+library(tidyverse)
+library(edgeR)
+library(RUVSeq)
+library(readxl)
+
+
+# 2. Run the Differential Expression Analysis (to get DE genes)
+# -----------------------------------------------------------
+# Load data
+gene_counts <- read.table("C:/Users/anany/Downloads/GSE85567_RNASeq_normalizedcounts.txt/GSE85567_RNASeq_normalizedcounts.txt", header = TRUE, row.names = 1)
+gse_expr <- getGEO(filename="C:/Users/anany/Downloads/GSE85567_series_matrix.txt/GSE85567_series_matrix.txt", getGPL = FALSE)
+pheno_data <- pData(gse_expr)
+
+targets <- tibble(
+  sample_id = rownames(pheno_data),
+  group = pheno_data$"disease status:ch1"
+) %>%
+  mutate(group = str_remove(group, "disease status: ")) %>%
+  mutate(group = as.factor(group))
+
+# --- THE CRUCIAL FIX IS HERE ---
+# Explicitly set "Control" as the baseline reference level.
+# This ensures the model creates the correct 'groupAsthma' coefficient.
+targets$group <- relevel(targets$group, ref = "Control")
+# --------------------------------
+
+# Map sample IDs and create DGEList
+id_map <- tibble(expression_col_name = colnames(gene_counts), sample_id = targets$sample_id)
+colnames(gene_counts) <- id_map$sample_id
+dge <- DGEList(counts = gene_counts, group = targets$group)
+
+# Filter, normalize, and run RUVSeq
+keep <- filterByExpr(dge, min.count = 5, min.total.count = 10, min.prop = 0.1)
+dge <- dge[keep, , keep.lib.sizes=FALSE]
+dge <- calcNormFactors(dge)
+logcpm <- cpm(dge, log=TRUE)
+gene_variances <- apply(logcpm, 1, var)
+empirical_controls <- names(sort(gene_variances))[1:floor(nrow(dge$counts) * 0.1)]
+ruv_results <- RUVg(dge$counts, empirical_controls, k=2)
+unwanted_factors <- as.data.frame(ruv_results$W)
+
+# Run the statistical model
+model_data <- cbind(targets, unwanted_factors)
+design <- model.matrix(~ group + W_1 + W_2, data = model_data)
+dge <- estimateDisp(dge, design)
+fit <- glmQLFit(dge, design)
+qlf <- glmQLFTest(fit, coef="groupAsthma") # This will now work
+
+# Get the full results and create our list of DE genes
+full_results_table <- topTags(qlf, n = Inf)$table
+de_genes <- full_results_table %>%
+  filter(FDR < 0.05) %>%
+  rownames()
+
+
+# 3. Perform the Enrichment Test
+# -------------------------------
+# Define the "universe" of all genes tested
+all_tested_genes <- rownames(full_results_table)
+
+# [cite_start]Load the authors' published eQTL gene list from Supplemental Table 3 [cite: 108]
+eQTL_results_raw <- read_excel("C:/Users/anany/Downloads/jci.insight.90151.sdt1t2t3t4t6t7.xlsx", 
+                               skip = 1)
+eQTL_genes <- unique(eQTL_results_raw$gene)
+
+# Build the 2x2 contingency table for the test
+count_DE_and_eQTL <- length(intersect(de_genes, eQTL_genes))
+count_DE_not_eQTL <- length(de_genes) - count_DE_and_eQTL
+eQTL_genes_in_universe <- intersect(eQTL_genes, all_tested_genes)
+count_notDE_and_eQTL <- length(eQTL_genes_in_universe) - count_DE_and_eQTL
+count_notDE_not_eQTL <- length(all_tested_genes) - length(de_genes) - count_notDE_and_eQTL
+
+contingency_table <- matrix(c(
+  count_DE_and_eQTL, count_notDE_and_eQTL,
+  count_DE_not_eQTL, count_notDE_not_eQTL
+), nrow = 2)
+
+
+# 4. Get the Final P-Value
+# ------------------------
+# Run the Fisher's Exact Test
+fisher_test_result <- fisher.test(contingency_table, alternative = "greater")
+
+cat("\n\n--- eQTL Enrichment Test Result ---\n")
+cat("Contingency Table:\n")
+print(contingency_table)
+cat("\nFinal P-Value:", fisher_test_result$p.value, "\n")
+cat("\nA p-value > 0.05 means there is NO significant enrichment, replicating the paper's finding.\n")
+```
+```{r}
+print("My DE Genes look like:")
+print(head(de_genes))
+
+# Check the format of the Paper's eQTL genes
+print("Paper's eQTL Genes look like:")
+print(head(eQTL_genes))
+```
+
+```{r}
+library(org.Hs.eg.db)
+
+# 1. Check if we need to add the symbol column
+# We take the row names (Ensembl IDs), strip the version number, and map to Symbols
+full_results_table$symbol <- mapIds(org.Hs.eg.db,
+                                    keys = substr(rownames(full_results_table), 1, 15),
+                                    column = "SYMBOL",
+                                    keytype = "ENSEMBL",
+                                    multiVals = "first")
+
+# 2. Verify it worked (You should see a 'symbol' column now)
+print(head(full_results_table))
+```
+```{r}
+# A. Load the paper's list (eQTL genes)
+# We assume the file is loaded from previous steps, but let's ensure we get the symbols
+library(readxl)
+# Note: Ensure you point to the correct file path
+eQTL_results_raw <- read_excel("C:/Users/anany/Downloads/jci.insight.90151.sdt1t2t3t4t6t7.xlsx", 
+                               sheet = "Table S3", 
+                               skip = 1)
+# The paper usually provides symbols in a column named 'gene' or 'symbol'
+# Let's clean it to be sure
+paper_eqtl_symbols <- unique(eQTL_results_raw$gene)
+
+
+# B. Get YOUR Differentially Expressed (DE) Symbols
+# We use the 'symbol' column you created in the previous step
+my_de_genes_symbols <- full_results_table %>%
+  filter(FDR < 0.05) %>%
+  pull(symbol) %>%     # Extract the symbol column
+  na.omit() %>%        # Remove any NAs
+  unique()
+
+# C. Define the Universe (All genes you could have found)
+universe_symbols <- full_results_table$symbol %>%
+  na.omit() %>%
+  unique()
+
+
+# D. Debugging: Check the Overlap specifically
+overlap_genes <- intersect(my_de_genes_symbols, paper_eqtl_symbols)
+cat("Number of DE Genes found:", length(my_de_genes_symbols), "\n")
+cat("Number of eQTL Genes in paper:", length(paper_eqtl_symbols), "\n")
+cat("Overlap Size:", length(overlap_genes), "\n")
+if(length(overlap_genes) > 0) {
+  cat("Examples of overlapping genes:", head(overlap_genes), "\n")
+} else {
+  cat("WARNING: Still 0 overlap. Check if 'paper_eqtl_symbols' are definitely Gene Symbols (e.g. CCL26) and not IDs.\n")
+}
+
+
+# E. Build the Contingency Table
+# (Only proceed if overlap > 0, otherwise P will be 1)
+count_DE_and_eQTL <- length(overlap_genes)
+count_DE_not_eQTL <- length(my_de_genes_symbols) - count_DE_and_eQTL
+
+# How many universe genes are in the eQTL list?
+universe_in_eQTL <- intersect(universe_symbols, paper_eqtl_symbols)
+count_notDE_and_eQTL <- length(universe_in_eQTL) - count_DE_and_eQTL
+count_notDE_not_eQTL <- length(universe_symbols) - length(my_de_genes_symbols) - count_notDE_and_eQTL
+
+contingency_table <- matrix(c(
+  count_DE_and_eQTL, count_notDE_and_eQTL,
+  count_DE_not_eQTL, count_notDE_not_eQTL
+), nrow = 2)
+
+# F. Run the Fisher's Exact Test
+fisher_test_result <- fisher.test(contingency_table, alternative = "greater")
+
+cat("\n--- eQTL Enrichment Test Result (Symbol Based) ---\n")
+print(contingency_table)
+cat("\nFinal P-Value:", fisher_test_result$p.value, "\n")
+```
+```{r}
+cat("Successfully extracted", length(my_de_genes_symbols), "DE gene symbols.\n")
+```
+```{r}
+# ==============================================================================
+# PART 1: LIBRARY SETUP & SAFETY CHECKS
+# ==============================================================================
+if (!require("BiocManager", quietly = TRUE)) install.packages("BiocManager")
+
+# Install missing packages automatically
+required_pkgs <- c("rGREAT", "IlluminaHumanMethylation450kanno.ilmn12.hg19", 
+                   "clusterProfiler", "org.Hs.eg.db", "ggVennDiagram", "tidyverse")
+new_pkgs <- required_pkgs[!(required_pkgs %in% installed.packages()[,"Package"])]
+if(length(new_pkgs)) BiocManager::install(new_pkgs)
+
+library(rGREAT)
+library(IlluminaHumanMethylation450kanno.ilmn12.hg19)
+library(clusterProfiler)
+library(org.Hs.eg.db)
+library(ggVennDiagram)
+library(tidyverse)
+
+# --- SAFETY FIX: Ensure Gene Symbols Exist ---
+# Sometimes full_results_table loses the symbol column. Let's re-add it to be safe.
+if(!"symbol" %in% colnames(full_results_table)) {
+  full_results_table$symbol <- mapIds(org.Hs.eg.db,
+                                      keys = substr(rownames(full_results_table), 1, 15),
+                                      column = "SYMBOL",
+                                      keytype = "ENSEMBL",
+                                      multiVals = "first")
+}
+
+# ==============================================================================
+# PART 2: rGREAT ANALYSIS (Methylation -> Function)
+# ==============================================================================
+# ==============================================================================
+# PART 2: rGREAT ANALYSIS (Fixed)
+# ==============================================================================
+cat("\n--- Running rGREAT Analysis ---\n")
+
+# 1. Extract Significant CpG sites
+# FIX: Check if IDs are in a column named 'CpG_Site' or in the rownames
+if("CpG_Site" %in% colnames(results)) {
+  # If you ran rownames_to_column earlier, the IDs are here:
+  sig_cpgs <- results %>% 
+    filter(adj.P.Val < 0.05) %>% 
+    pull(CpG_Site)
+} else {
+  # Otherwise, they are still in the rownames:
+  sig_cpgs <- results %>% 
+    filter(adj.P.Val < 0.05) %>% 
+    rownames()
+}
+
+# 2. Get genomic coordinates
+ann450k <- getAnnotation(IlluminaHumanMethylation450kanno.ilmn12.hg19)
+
+# Safety Check: Intersect with annotation IDs
+valid_cpgs <- intersect(sig_cpgs, rownames(ann450k))
+
+cat("Original significant sites:", length(sig_cpgs), "\n")
+cat("Valid annotatable sites:", length(valid_cpgs), " (Should be > 0 now)\n")
+
+# STOP if still zero
+if(length(valid_cpgs) == 0) stop("ERROR: No valid CpG IDs found. Check if 'results' has 'cg...' IDs.")
+
+# Subset and prepare coordinates
+cpg_coords <- ann450k[valid_cpgs, c("chr", "pos")] %>%
+  as.data.frame() %>%
+  rownames_to_column(var = "cpg_id") %>%
+  na.omit()
+
+# 3. Submit to GREAT Server
+# Format chromosomes (ensure 'chr' prefix exists)
+if(!any(grepl("chr", cpg_coords$chr[1:5]))) {
+  cpg_coords$chr <- paste0("chr", cpg_coords$chr)
+}
+
+gr_cpgs <- GRanges(seqnames = cpg_coords$chr, ranges = IRanges(start = cpg_coords$pos, width = 2))
+great_job <- submitGreatJob(gr_cpgs, species = "hg19")
+
+# 4. Get the table of Methylation-Driven Pathways
+tb_methylation <- getEnrichmentTables(great_job, category = "GO")[[1]]
+
+# Print top pathways
+print(head(tb_methylation[, c("ID", "name", "Binom_Adjp_BH")]))
+
+# ==============================================================================
+# PART 3: CLUSTERPROFILER (Comparing Methylation vs. Expression)
+# ==============================================================================
+cat("\n--- Running ClusterProfiler Comparison ---\n")
+
+# 1. Get Genes driven by Methylation (from rGREAT job)
+res_genes <- plotRegionGeneAssociationGraphs(great_job)
+meth_genes_entrez <- unique(res_genes$gene)
+
+# 2. Get Genes driven by Expression (from RNA-seq)
+expr_genes_symbol <- full_results_table %>% 
+  filter(FDR < 0.05) %>% 
+  pull(symbol) %>% 
+  na.omit()
+
+# Convert Expression symbols to Entrez IDs for the comparison tool
+expr_genes_entrez <- bitr(expr_genes_symbol, fromType="SYMBOL", toType="ENTREZID", OrgDb="org.Hs.eg.db")$ENTREZID
+
+# 3. Run the Comparison
+gene_clusters <- list(
+  Methylation_Driven = as.character(meth_genes_entrez), 
+  Expression_Driven = as.character(expr_genes_entrez)
+)
+
+comp_results <- compareCluster(geneCluster = gene_clusters, 
+                               fun = "enrichGO", 
+                               OrgDb = org.Hs.eg.db, 
+                               ont = "BP",  # Biological Process
+                               pAdjustMethod = "BH")
+
+# 4. Plot the "Bridge" (Dotplot)
+dotplot(comp_results, showCategory = 10, title = "Shared Biology: Methylation vs. Expression")
+
+# ==============================================================================
+# PART 4: LITERATURE VALIDATION (The "Cool Analysis")
+# ==============================================================================
+cat("\n--- Checking Overlap with Major Papers ---\n")
+
+# 1. Define Signatures from Literature
+# Science Immunology 2023 (Villani et al) - Epithelial Injury
+sig_villani <- c("MUC5AC", "MUC5B", "AREG", "POSTN", "CST1", "SERPINB2", "CLCA1", "ALOX15", "TCN1")
+
+# Nature/Exp Mol Med 2024 (Park et al) - Biologic Response / Th2
+sig_park <- c("CCL26", "POSTN", "SERPINB2", "CLCA1", "IL13", "IL4", "IL5", "GATA3", "FCER2", "HPGD")
+
+# 2. Your Significant Gene List
+my_genes <- full_results_table %>% 
+  filter(FDR < 0.05) %>% 
+  pull(symbol) %>% 
+  na.omit()
+
+# 3. Calculate Overlaps
+overlap_villani <- intersect(my_genes, sig_villani)
+overlap_park <- intersect(my_genes, sig_park)
+
+# 4. Print Results
+cat("\n[1] Overlap with Science Immunology (Epithelial Injury):\n")
+if(length(overlap_villani) > 0) print(overlap_villani) else cat("No overlap found.\n")
+
+cat("\n[2] Overlap with Nature (Biologic Response):\n")
+if(length(overlap_park) > 0) print(overlap_park) else cat("No overlap found.\n")
+
+# 5. Venn Diagram Plot
+venn_list <- list(
+  "My Results" = my_genes, 
+  "Sci. Immunol (Injury)" = sig_villani, 
+  "Nature (Response)" = sig_park
+)
+
+ggVennDiagram(venn_list) + 
+  scale_fill_gradient(low = "#F4FAFE", high = "#4981BF") + 
+  ggtitle("Validation: Overlap with Recent Studies")
+```
+```{r}
+tb_methylation <- getEnrichmentTables(great_job, category = "GO")[[1]]
+
+# --- DIAGNOSTIC FIX ---
+cat("\n--- Debugging Column Names ---\n")
+print(colnames(tb_methylation))
+
+# Try to print the top 5 rows of the WHOLE table first (safest)
+print(head(tb_methylation))
+```
+
+```{r}
+# ==============================================================================
+# PART 1: LIBRARY SETUP & SAFETY CHECKS
+# ==============================================================================
+if (!require("BiocManager", quietly = TRUE)) install.packages("BiocManager")
+
+# Install missing packages automatically
+required_pkgs <- c("rGREAT", "IlluminaHumanMethylation450kanno.ilmn12.hg19", 
+                   "clusterProfiler", "org.Hs.eg.db", "ggVennDiagram", "tidyverse")
+new_pkgs <- required_pkgs[!(required_pkgs %in% installed.packages()[,"Package"])]
+if(length(new_pkgs)) BiocManager::install(new_pkgs)
+
+library(rGREAT)
+library(IlluminaHumanMethylation450kanno.ilmn12.hg19)
+library(clusterProfiler)
+library(org.Hs.eg.db)
+library(ggVennDiagram)
+library(tidyverse)
+
+# --- SAFETY FIX: Ensure Gene Symbols Exist ---
+# Sometimes full_results_table loses the symbol column. Let's re-add it to be safe.
+if(!"symbol" %in% colnames(full_results_table)) {
+  full_results_table$symbol <- mapIds(org.Hs.eg.db,
+                                      keys = substr(rownames(full_results_table), 1, 15),
+                                      column = "SYMBOL",
+                                      keytype = "ENSEMBL",
+                                      multiVals = "first")
+}
+
+# ==============================================================================
+# PART 2: rGREAT ANALYSIS (Methylation -> Function)
+# ==============================================================================
+# ==============================================================================
+# PART 2: rGREAT ANALYSIS (Fixed)
+# ==============================================================================
+cat("\n--- Running rGREAT Analysis ---\n")
+
+# 1. Extract Significant CpG sites
+# FIX: Check if IDs are in a column named 'CpG_Site' or in the rownames
+if("CpG_Site" %in% colnames(results)) {
+  # If you ran rownames_to_column earlier, the IDs are here:
+  sig_cpgs <- results %>% 
+    filter(adj.P.Val < 0.05) %>% 
+    pull(CpG_Site)
+} else {
+  # Otherwise, they are still in the rownames:
+  sig_cpgs <- results %>% 
+    filter(adj.P.Val < 0.05) %>% 
+    rownames()
+}
+
+# 2. Get genomic coordinates
+ann450k <- getAnnotation(IlluminaHumanMethylation450kanno.ilmn12.hg19)
+
+# Safety Check: Intersect with annotation IDs
+valid_cpgs <- intersect(sig_cpgs, rownames(ann450k))
+
+cat("Original significant sites:", length(sig_cpgs), "\n")
+cat("Valid annotatable sites:", length(valid_cpgs), " (Should be > 0 now)\n")
+
+# STOP if still zero
+if(length(valid_cpgs) == 0) stop("ERROR: No valid CpG IDs found. Check if 'results' has 'cg...' IDs.")
+
+# Subset and prepare coordinates
+cpg_coords <- ann450k[valid_cpgs, c("chr", "pos")] %>%
+  as.data.frame() %>%
+  rownames_to_column(var = "cpg_id") %>%
+  na.omit()
+
+# 3. Submit to GREAT Server
+# Format chromosomes (ensure 'chr' prefix exists)
+if(!any(grepl("chr", cpg_coords$chr[1:5]))) {
+  cpg_coords$chr <- paste0("chr", cpg_coords$chr)
+}
+
+gr_cpgs <- GRanges(seqnames = cpg_coords$chr, ranges = IRanges(start = cpg_coords$pos, width = 2))
+great_job <- submitGreatJob(gr_cpgs, species = "hg19")
+
+# 4. Get the table of Methylation-Driven Pathways
+tb_methylation <- getEnrichmentTables(great_job, category = "GO")[[1]]
+
+# Print top pathways
+print(head(tb_methylation[, c("ID", "name", "Binom_Adjp_BH")]))
+
+# ==============================================================================
+# PART 3: CLUSTERPROFILER (ROBUST LOCAL VERSION)
+# ==============================================================================
+library(clusterProfiler)
+library(org.Hs.eg.db)
+library(IlluminaHumanMethylation450kanno.ilmn12.hg19)
+ 
+cat("\n--- Extracting Methylation Genes (Using Local Annotation) ---\n")
+
+# 1. Get the list of Significant CpG IDs (from your results)
+sig_cpg_ids <- results %>% 
+  filter(adj.P.Val < 0.05) %>% 
+  rownames()
+
+# 2. Load the Chip Annotation
+ann450k <- getAnnotation(IlluminaHumanMethylation450kanno.ilmn12.hg19)
+
+# 3. Match your Significant CpGs to the Annotation
+# We only look at the sites you found significant
+sig_ann <- ann450k[sig_cpg_ids, ]
+
+# 4. Extract the Gene Symbols
+# The column 'UCSC_RefGene_Name' contains the genes (e.g., "CCL26;CCL26")
+raw_gene_symbols <- sig_ann$UCSC_RefGene_Name
+
+# Clean the list:
+# - Remove empty entries
+# - Split multiple genes (separated by ";")
+# - Get unique values
+meth_genes_symbol <- unique(unlist(strsplit(raw_gene_symbols, ";")))
+meth_genes_symbol <- meth_genes_symbol[meth_genes_symbol != ""] # Remove blanks
+
+cat("✅ Methylation Genes Found:", length(meth_genes_symbol), "\n")
+
+
+# --- STEP 2: PREPARE EXPRESSION GENES ---
+# (This part ensures your expression list is also ready)
+expr_genes_symbol <- full_results_table %>% 
+  filter(FDR < 0.05) %>% 
+  pull(symbol) %>% 
+  na.omit() %>%
+  unique()
+
+cat("✅ Expression Genes Found:", length(expr_genes_symbol), "\n")
+
+
+# --- STEP 3: RUN THE COMPARISON ---
+
+# Convert BOTH lists to Entrez IDs (Required for ClusterProfiler)
+cat("\n--- Converting Symbols to Entrez IDs ---\n")
+meth_genes_entrez <- bitr(meth_genes_symbol, fromType="SYMBOL", toType="ENTREZID", OrgDb="org.Hs.eg.db")$ENTREZID
+expr_genes_entrez <- bitr(expr_genes_symbol, fromType="SYMBOL", toType="ENTREZID", OrgDb="org.Hs.eg.db")$ENTREZID
+
+# Only plot if we have genes in both lists
+if(length(meth_genes_entrez) > 0 && length(expr_genes_entrez) > 0) {
+  
+  gene_clusters <- list(
+    Methylation_Driven = as.character(meth_genes_entrez), 
+    Expression_Driven = as.character(expr_genes_entrez)
+  )
+
+  # Run the Enrichment Comparison
+  comp_results <- compareCluster(geneCluster = gene_clusters, 
+                                 fun = "enrichGO", 
+                                 OrgDb = org.Hs.eg.db, 
+                                 ont = "BP",  
+                                 pAdjustMethod = "BH",
+                                 pvalueCutoff = 0.05) 
+
+  # Plot
+  print(dotplot(comp_results, showCategory = 10, title = "Shared Biology: Methylation vs. Expression"))
+  
+} else {
+  cat("❌ Error: One of the gene lists is empty after conversion.\n")
+}
+```
+
+```{r}
+# ==============================================================================
+# RESCUE SCRIPT: Multi-Omics Plot (Relaxed Thresholds)
+# ==============================================================================
+library(clusterProfiler)
+library(org.Hs.eg.db)
+library(IlluminaHumanMethylation450kanno.ilmn12.hg19)
+library(tidyverse)
+
+cat("\n--- DIAGNOSTIC START ---\n")
+
+# ------------------------------------------------------------------------------
+# STEP 1: FIX METHYLATION EXTRACTION
+# ------------------------------------------------------------------------------
+cat("[1] Extracting Methylation Genes...\n")
+
+# 1. Get Significant CpG IDs (Ensure it's a character vector)
+# We accept P < 0.05 (Standard for methylation)
+sig_cpg_ids <- results %>% 
+  filter(adj.P.Val < 0.05) %>% 
+  rownames()
+
+cat("    - Significant CpG Sites:", length(sig_cpg_ids), "\n")
+
+# 2. Load Annotation & Subset
+ann450k <- getAnnotation(IlluminaHumanMethylation450kanno.ilmn12.hg19)
+# Safety: Only keep IDs that exist in the annotation
+valid_ids <- intersect(sig_cpg_ids, rownames(ann450k))
+ann_subset <- ann450k[valid_ids, ]
+
+# 3. Extract & Clean Gene Names
+# The column is 'UCSC_RefGene_Name'. It looks like "GeneA;GeneB;GeneA"
+raw_genes <- ann_subset$UCSC_RefGene_Name
+# Split by semicolon, unlist into a big vector, and take unique values
+meth_genes_symbol <- unique(unlist(strsplit(raw_genes, ";")))
+
+# 4. CLEANUP: Remove empty strings ("") and NAs
+meth_genes_symbol <- meth_genes_symbol[meth_genes_symbol != ""]
+meth_genes_symbol <- meth_genes_symbol[!is.na(meth_genes_symbol)]
+
+cat("    - ✅ Unique Methylation Genes Found:", length(meth_genes_symbol), "\n")
+if(length(meth_genes_symbol) > 0) print(head(meth_genes_symbol))
+
+
+# ------------------------------------------------------------------------------
+# STEP 2: FIX EXPRESSION EXTRACTION (RELAXED THRESHOLD)
+# ------------------------------------------------------------------------------
+cat("\n[2] Extracting Expression Genes...\n")
+
+# 1. Ensure 'symbol' column exists
+if(!"symbol" %in% colnames(full_results_table)) {
+   full_results_table$symbol <- mapIds(org.Hs.eg.db,
+                                       keys = substr(rownames(full_results_table), 1, 15),
+                                       column = "SYMBOL",
+                                       keytype = "ENSEMBL",
+                                       multiVals = "first")
+}
+
+# 2. FILTER: Switch to PValue < 0.01 to get enough genes for the plot
+# (FDR < 0.05 was too strict, yielding only 1 gene)
+sig_expr_df <- full_results_table %>% 
+  filter(PValue < 0.01) %>%  # <--- RELAXED THRESHOLD
+  filter(!is.na(symbol))
+
+expr_genes_symbol <- unique(sig_expr_df$symbol)
+
+cat("    - ✅ Unique Expression Genes Found (P < 0.01):", length(expr_genes_symbol), "\n")
+if(length(expr_genes_symbol) > 0) print(head(expr_genes_symbol))
+
+
+# ------------------------------------------------------------------------------
+# STEP 3: RUN CLUSTERPROFILER
+# ------------------------------------------------------------------------------
+cat("\n[3] Running Pathway Comparison...\n")
+
+if(length(meth_genes_symbol) > 5 && length(expr_genes_symbol) > 5) {
+  
+  # Convert to Entrez IDs
+  meth_entrez <- bitr(meth_genes_symbol, fromType="SYMBOL", toType="ENTREZID", OrgDb="org.Hs.eg.db")$ENTREZID
+  expr_entrez <- bitr(expr_genes_symbol, fromType="SYMBOL", toType="ENTREZID", OrgDb="org.Hs.eg.db")$ENTREZID
+  
+  gene_clusters <- list(
+    Methylation = meth_entrez, 
+    Expression = expr_entrez
+  )
+  
+  # Run Comparison (Relaxed q-value to ensure dots appear)
+  comp_results <- compareCluster(geneCluster = gene_clusters, 
+                                 fun = "enrichGO", 
+                                 OrgDb = org.Hs.eg.db, 
+                                 ont = "BP",
+                                 pAdjustMethod = "BH",
+                                 pvalueCutoff = 0.05,
+                                 qvalueCutoff = 0.2) # Relaxed to show trends
+  
+  # Plot
+  print(dotplot(comp_results, showCategory = 10, title = "Shared Biology (Relaxed Thresholds)"))
+  
+} else {
+  cat("❌ STOP: Still not enough genes. Methylation:", length(meth_genes_symbol), "Expression:", length(expr_genes_symbol), "\n")
+}
+```
+```{r}
+# ==============================================================================
+# FINAL FIX: Multi-Omics Plot (Smart ID Detection)
+# ==============================================================================
+library(clusterProfiler)
+library(org.Hs.eg.db)
+library(IlluminaHumanMethylation450kanno.ilmn12.hg19)
+library(tidyverse)
+
+cat("\n--- STEP 1: FIXING METHYLATION IDs ---\n")
+
+# 1. SMART ID DETECTION
+# We check where the "cg..." IDs are hiding
+if("CpG_Site" %in% colnames(results)) {
+  # Scenario A: They are in a column named 'CpG_Site'
+  cat("Found IDs in 'CpG_Site' column.\n")
+  sig_cpg_ids <- results %>% filter(adj.P.Val < 0.05) %>% pull(CpG_Site)
+  
+} else if (grepl("cg", rownames(results)[1])) {
+  # Scenario B: They are correctly in the rownames
+  cat("Found IDs in rownames.\n")
+  sig_cpg_ids <- results %>% filter(adj.P.Val < 0.05) %>% rownames()
+  
+} else {
+  # Scenario C: Fallback - assume first column might have them if unnamed
+  cat("⚠️ Searching columns for 'cg' IDs...\n")
+  # Find the first column that contains "cg" strings
+  id_col <- names(results)[sapply(results, function(x) any(grepl("^cg", head(x))))][1]
+  if(!is.na(id_col)) {
+    cat("Found IDs in column:", id_col, "\n")
+    sig_cpg_ids <- results %>% filter(adj.P.Val < 0.05) %>% pull(!!sym(id_col))
+  } else {
+    stop("❌ CRITICAL ERROR: Cannot find any column with 'cg...' IDs in your results table.")
+  }
+}
+
+cat("    - Extracted", length(sig_cpg_ids), "significant IDs.\n")
+
+
+# 2. MAP TO GENES (Local Annotation)
+ann450k <- getAnnotation(IlluminaHumanMethylation450kanno.ilmn12.hg19)
+valid_ids <- intersect(sig_cpg_ids, rownames(ann450k))
+cat("    - Validated", length(valid_ids), "IDs against database.\n")
+
+# Extract Gene Names
+ann_subset <- ann450k[valid_ids, ]
+raw_genes <- ann_subset$UCSC_RefGene_Name
+meth_genes_symbol <- unique(unlist(strsplit(raw_genes, ";")))
+meth_genes_symbol <- meth_genes_symbol[meth_genes_symbol != "" & !is.na(meth_genes_symbol)]
+
+cat("✅ Unique Methylation Genes Found:", length(meth_genes_symbol), "\n")
+
+
+# --- STEP 2: PREPARE EXPRESSION GENES (Same as before) ---
+cat("\n--- STEP 2: EXPRESSION GENES ---\n")
+
+# Ensure symbol column exists
+if(!"symbol" %in% colnames(full_results_table)) {
+   full_results_table$symbol <- mapIds(org.Hs.eg.db,
+                                       keys = substr(rownames(full_results_table), 1, 15),
+                                       column = "SYMBOL",
+                                       keytype = "ENSEMBL",
+                                       multiVals = "first")
+}
+
+# Use Relaxed Threshold (P < 0.01)
+sig_expr_df <- full_results_table %>% 
+  filter(PValue < 0.01) %>% 
+  filter(!is.na(symbol))
+
+expr_genes_symbol <- unique(sig_expr_df$symbol)
+cat("✅ Unique Expression Genes Found:", length(expr_genes_symbol), "\n")
+
+
+# --- STEP 3: RUN PLOT ---
+cat("\n--- STEP 3: GENERATING PLOT ---\n")
+
+if(length(meth_genes_symbol) > 5 && length(expr_genes_symbol) > 5) {
+  
+  meth_entrez <- bitr(meth_genes_symbol, fromType="SYMBOL", toType="ENTREZID", OrgDb="org.Hs.eg.db")$ENTREZID
+  expr_entrez <- bitr(expr_genes_symbol, fromType="SYMBOL", toType="ENTREZID", OrgDb="org.Hs.eg.db")$ENTREZID
+  
+  gene_clusters <- list(
+    Methylation = meth_entrez, 
+    Expression = expr_entrez
+  )
+  
+  # Run Comparison
+  comp_results <- compareCluster(geneCluster = gene_clusters, 
+                                 fun = "enrichGO", 
+                                 OrgDb = org.Hs.eg.db, 
+                                 ont = "BP",
+                                 pAdjustMethod = "BH",
+                                 pvalueCutoff = 0.05,
+                                 qvalueCutoff = 0.2) 
+  
+  print(dotplot(comp_results, showCategory = 10, title = "Shared Biology (Methylation vs Expression)"))
+  
+} else {
+  cat("❌ STOP: Not enough genes for plotting.\n")
+}
+```
+```{r}
+# ==============================================================================
+# STEP 4: DIAGNOSING THE EXPRESSION SIGNAL
+# ==============================================================================
+cat("\n--- Analyzing Expression Genes in Isolation ---\n")
+
+# 1. Run Enrichment ONLY on Expression Genes
+# We use 'pAdjustMethod = "none"' to see the raw signal first
+ego_expr <- enrichGO(gene          = expr_entrez,
+                     OrgDb         = org.Hs.eg.db,
+                     ont           = "BP",
+                     pAdjustMethod = "none", # No strict correction yet
+                     pvalueCutoff  = 0.05,
+                     readable      = TRUE)
+
+cat("Found", nrow(ego_expr), "pathways in Expression data (Raw P < 0.05).\n")
+if(nrow(ego_expr) > 0) print(head(ego_expr))
+
+# 2. GENERATE THE COMBINED PLOT (FORCED)
+# We will use 'pAdjustMethod = "none"' for the comparison to ensure the 
+# Expression column appears. This is acceptable for exploratory visualization.
+
+cat("\n--- Generating Forced Comparison Plot ---\n")
+
+comp_results_forced <- compareCluster(geneCluster = gene_clusters, 
+                                      fun = "enrichGO", 
+                                      OrgDb = org.Hs.eg.db, 
+                                      ont = "BP",
+                                      pAdjustMethod = "none", # <--- THE KEY CHANGE
+                                      pvalueCutoff  = 0.05)   # Stricter raw P to reduce noise
+
+# Plot with split categories to give them equal space
+p <- dotplot(comp_results_forced, showCategory = 5, title = "Methylation vs Expression (Exploratory)") + 
+  ggplot2::theme(axis.text.x = ggplot2::element_text(angle = 45, hjust = 1))
+
+ggsave("MultiOmics_Dotplot.png", plot = p, height = 12, width = 8, dpi = 300)
+```
+```{r}
+p <- dotplot(comp_results_forced, showCategory = 5, title = "Methylation vs Expression (Exploratory)") + 
+  ggplot2::theme(axis.text.x = ggplot2::element_text(angle = 45, hjust = 1))
+
+ggsave("MultiOmics_Dotplot.png", plot = p, height = 7, width = 8, dpi = 300)
+```
+
+```{r}
+# ==============================================================================
+# FINAL STEP: GENE SIGNATURE VALIDATION
+# ==============================================================================
+library(ggVennDiagram)
+library(tidyverse)
+
+# 1. Define the External Signatures (from Literature)
+# ---------------------------------------------------
+
+# A. Science Immunology (Villani et al., 2023) - "Epithelial Injury"
+# These genes mark damaged airways that are trying to heal.
+sig_villani <- c("MUC5AC", "MUC5B", "AREG", "POSTN", "CST1", "SERPINB2", 
+                 "CLCA1", "ALOX15", "TCN1", "BPIFA1", "FOXA3")
+
+# B. Nature (Park et al., 2024) - "Biologic Response / Th2-High"
+# These genes are the "core" asthma signature seen in blood and tissue.
+sig_park <- c("CCL26", "POSTN", "SERPINB2", "CLCA1", "IL13", "IL4", 
+              "IL5", "GATA3", "FCER2", "HPGD", "CPA3")
+
+
+# 2. Prepare YOUR Signature
+# -------------------------
+# We use the 133 genes from your Expression analysis (the "Secretion" signal)
+# Safety check: Ensure the list exists from the previous step
+if(!exists("expr_genes_symbol")) {
+  stop("⚠️ Error: 'expr_genes_symbol' is missing. Please run the previous 'Final Fix' script first.")
+}
+
+my_signature <- expr_genes_symbol
+
+
+# 3. Clean and Standardize (Crucial Step!)
+# ---------------------------------------
+# We force everything to Upper Case and remove hidden spaces to prevent mismatches.
+clean_villani <- unique(toupper(trimws(sig_villani)))
+clean_park    <- unique(toupper(trimws(sig_park)))
+clean_mine    <- unique(toupper(trimws(my_signature)))
+
+
+# 4. Check for Overlaps
+# ---------------------
+# Calculate the intersections
+overlap_villani <- intersect(clean_mine, clean_villani)
+overlap_park    <- intersect(clean_mine, clean_park)
+overlap_both    <- intersect(overlap_villani, overlap_park)
+
+cat("\n--- VALIDATION RESULTS ---\n")
+cat("My Signature Size:", length(clean_mine), "genes\n")
+cat("Overlap with Sci. Immunol (Injury):", length(overlap_villani), "\n")
+if(length(overlap_villani) > 0) cat("   -> Genes:", paste(overlap_villani, collapse=", "), "\n")
+
+cat("Overlap with Nature (Th2 Response):", length(overlap_park), "\n")
+if(length(overlap_park) > 0) cat("   -> Genes:", paste(overlap_park, collapse=", "), "\n")
+
+
+# 5. Generate the Venn Diagram
+# ----------------------------
+venn_list <- list(
+  "My Results" = clean_mine, 
+  "Sci. Immunol" = clean_villani, 
+  "Nature" = clean_park
+)
+
+# Plot
+p<-ggVennDiagram(venn_list, label_alpha = 0) + 
+  scale_fill_gradient(low = "#F4FAFE", high = "#4981BF") +
+  ggtitle("Validation: My Signature vs. Literature") +
+  theme(legend.position = "none")
+ggsave("gene_sigs.png", plot = p, height = 8, width = 8, dpi = 300)
+```
+```{r}
+# ==============================================================================
+# DETECTIVE SCRIPT: Where are the famous asthma genes?
+# ==============================================================================
+library(tidyverse)
+
+# 1. Define the "Famous" Genes we expect to see
+target_genes <- c("POSTN", "CLCA1", "SERPINB2", "CST1", "MUC5AC", "MUC5B", "CCL26", "IL13", "GATA3")
+
+cat("--- SEARCHING FOR TARGET GENES IN FULL RESULTS ---\n")
+
+# 2. Search in the Full Results Table (before filtering)
+# We assume 'full_results_table' exists and has a 'symbol' column
+if("symbol" %in% colnames(full_results_table)) {
+  
+  # Filter for the targets
+  found_targets <- full_results_table %>%
+    filter(symbol %in% target_genes) %>%
+    select(symbol, logFC, PValue, FDR) %>%
+    arrange(PValue)
+  
+  # 3. Print what we found
+  if(nrow(found_targets) > 0) {
+    print(found_targets)
+    
+    cat("\n--- INTERPRETATION ---\n")
+    cat("Look at the PValue column above:\n")
+    cat("  - If PValue < 0.01: They SHOULD have been in your list. (Check for extra spaces in names)\n")
+    cat("  - If PValue is 0.05 to 0.10: They are there, but 'weak'. (Th2-Low Asthma)\n")
+    cat("  - If PValue > 0.5: They are not changing at all in this dataset.\n")
+    
+  } else {
+    cat("❌ CRITICAL: None of these genes were found in your table.\n")
+    cat("This implies a Naming Problem (e.g., your table uses IDs, not Symbols).\n")
+    cat("Please print head(full_results_table) to check the format.\n")
+  }
+
+} else {
+  cat("❌ Error: 'full_results_table' is missing the 'symbol' column.\n")
+  cat("Run the mapping code again (mapIds) to add symbols.\n")
+}
+
+# 4. Check what your Top 5 Genes actually are
+cat("\n--- YOUR TOP 5 GENES (The ones that DID pass) ---\n")
+top_genes <- full_results_table %>%
+  arrange(PValue) %>%
+  head(5) %>%
+  select(symbol, logFC, PValue)
+print(top_genes)
+```
+```{r}
+# ==============================================================================
+# TREND VALIDATION: The "Directionality" Check
+# ==============================================================================
+library(tidyverse)
+
+# 1. Define the Literature Signature Genes (The "Famous" ones)
+target_genes <- c("POSTN", "CLCA1", "SERPINB2", "CST1", "MUC5AC", "MUC5B", "CCL26", "IL13", "GATA3")
+
+# 2. Extract their stats from your Full Results
+signature_stats <- full_results_table %>%
+  filter(symbol %in% target_genes) %>%
+  select(symbol, logFC, PValue, FDR)
+
+# 3. Create the Visualization (Bar Plot of Log Fold Change)
+# We color bars by "Consistency": Red = Upregulated (Matches Literature), Blue = Downregulated
+q <- ggplot(signature_stats, aes(x = reorder(symbol, logFC), y = logFC)) +
+  geom_col(aes(fill = logFC > 0), color = "black", alpha = 0.8) +
+  
+  # Add the P-values on top of the bars so you can see "how weak" they are
+  geom_text(aes(label = paste0("P=", round(PValue, 2)), 
+                vjust = ifelse(logFC > 0, -0.5, 1.5)), 
+            size = 3.5, fontface = "bold") +
+  
+  scale_fill_manual(values = c("TRUE" = "firebrick", "FALSE" = "steelblue"), 
+                    labels = c("Downregulated", "Upregulated (Consistent)")) +
+  
+  labs(title = "Validation: Direction of Change for Key Asthma Genes",
+       subtitle = "Genes show consistent upregulation despite weak statistical significance",
+       y = "Log2 Fold Change (Asthma vs Control)",
+       x = "Gene Symbol",
+       fill = "Direction") +
+  
+  theme_minimal(base_size = 14) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  geom_hline(yintercept = 0, color = "black")
+ggsave("updownreg.png", plot = q, height = 6, width = 8, dpi = 300)
+
+```
+
+```{r}
+options(dplyr.width = Inf) 
+print(head(pheno_data))
+```
+```{r}
+# ==============================================================================
+# BIOMARKER FIX: Mapping IDs to Symbols (Safe Version)
+# ==============================================================================
+library(pROC)
+library(tidyverse)
+library(ggpubr)
+library(org.Hs.eg.db)
+
+# 1. Get the Count Matrix
+if(!exists("dge")) stop("⚠️ 'dge' object missing. Run edgeR normalization chunk first.")
+cpm_counts <- cpm(dge, log=TRUE)
+
+# 2. Find the "Secret Codes" (Ensembl IDs) for our Target Genes
+target_symbols <- c("MUC5AC", "POSTN")
+
+# --- THE FIX IS HERE: Use AnnotationDbi::select ---
+gene_map <- AnnotationDbi::select(org.Hs.eg.db, 
+                                  keys = target_symbols, 
+                                  columns = "ENSEMBL", 
+                                  keytype = "SYMBOL")
+
+print(gene_map) # Check what IDs we found
+
+# 3. Extract Data using the IDs
+expr_list <- list()
+
+for(i in 1:nrow(gene_map)) {
+  sym <- gene_map$SYMBOL[i]
+  ens_id <- gene_map$ENSEMBL[i]
+  
+  # Check if this Ensembl ID exists in your count matrix
+  # We use grep because your rows might have version numbers (ENSG...123.5)
+  match_row <- grep(ens_id, rownames(cpm_counts), value = TRUE)[1]
+  
+  if(!is.na(match_row)) {
+    cat("✅ Found", sym, "as", match_row, "\n")
+    expr_list[[sym]] <- as.numeric(cpm_counts[match_row, ])
+  } else {
+    cat("❌ Could not find Ensembl ID for", sym, "in the count matrix.\n")
+  }
+}
+
+# 4. Calculate Ratio & Plot (Only if both found)
+if("MUC5AC" %in% names(expr_list) && "POSTN" %in% names(expr_list)) {
+  
+  # Calculate Ratio: Log(MUC5AC) - Log(POSTN)
+  ratio_score <- expr_list[["MUC5AC"]] - expr_list[["POSTN"]]
+  
+  # Create Plotting Data
+  plot_data <- data.frame(
+    Status = targets$group,
+    Ratio = ratio_score
+  )
+  
+  # A. Boxplot
+  p_box <- ggplot(plot_data, aes(x = Status, y = Ratio, fill = Status)) +
+    geom_boxplot(alpha = 0.7, outlier.shape = NA) +
+    geom_jitter(width = 0.2, alpha = 0.5) +
+    stat_compare_means(method = "t.test", label.y = max(plot_data$Ratio) + 1) +
+    scale_fill_manual(values = c("Control" = "grey70", "Asthma" = "purple")) +
+    labs(title = "Biomarker Potential: MUC5AC / POSTN Ratio",
+         subtitle = "Higher Score = Mucus High + Th2 Low (Steroid Refractory)",
+         y = "Ratio Score (Log2 Difference)") +
+    theme_classic(base_size = 14)
+  
+  print(p_box)
+  
+  # B. ROC Curve
+  roc_obj <- roc(response = plot_data$Status, predictor = plot_data$Ratio,
+                 levels = c("Control", "Asthma"))
+  
+  auc_val <- round(auc(roc_obj), 3)
+  
+  plot(roc_obj, main = paste("ROC Curve (AUC =", auc_val, ")"),
+       col = "#D55E00", lwd = 3, legacy.axes = TRUE, print.auc = TRUE)
+  
+} else {
+  cat("STOP: Cannot calculate ratio because one gene is missing.\n")
+}
+```
+```{r}
+# ==============================================================================
+# BIOMARKER ROUND 2: Mucins & Steroid Response
+# ==============================================================================
+library(pROC)
+library(tidyverse)
+library(ggpubr)
+library(org.Hs.eg.db)
+
+# 1. Define Candidates
+candidates <- c("MUC5AC", "MUC5B", "FKBP5")
+
+# 2. Get Safe IDs (Map Symbols -> Ensembl)
+# We use AnnotationDbi to be safe
+gene_map <- AnnotationDbi::select(org.Hs.eg.db, 
+                                  keys = candidates, 
+                                  columns = "ENSEMBL", 
+                                  keytype = "SYMBOL")
+
+# 3. Extract Data
+if(!exists("cpm_counts")) cpm_counts <- cpm(dge, log=TRUE)
+expr_list <- list()
+
+cat("--- EXTRACTING GENES ---\n")
+for(i in 1:nrow(gene_map)) {
+  sym <- gene_map$SYMBOL[i]
+  ens_id <- gene_map$ENSEMBL[i]
+  match_row <- grep(ens_id, rownames(cpm_counts), value = TRUE)[1]
+  
+  if(!is.na(match_row)) {
+    cat("✅ Found", sym, "\n")
+    expr_list[[sym]] <- as.numeric(cpm_counts[match_row, ])
+  }
+}
+
+# 4. RUN ANALYSIS (Loop through candidates)
+# We also calculate the MUC5AC/MUC5B Ratio if both exist
+if("MUC5AC" %in% names(expr_list) && "MUC5B" %in% names(expr_list)) {
+  expr_list[["MUC5AC_MUC5B_Ratio"]] <- expr_list[["MUC5AC"]] - expr_list[["MUC5B"]]
+  candidates <- c(candidates, "MUC5AC_MUC5B_Ratio")
+}
+
+par(mfrow=c(2,2)) # 2x2 Plotting Grid
+
+for(gene in candidates) {
+  if(gene %in% names(expr_list)) {
+    
+    # Prepare Data
+    vals <- expr_list[[gene]]
+    roc_obj <- roc(response = targets$group, predictor = vals, levels = c("Control", "Asthma"))
+    auc_val <- round(auc(roc_obj), 3)
+    
+    # Plot ROC
+    plot(roc_obj, main = paste(gene, "\nAUC =", auc_val),
+         col = ifelse(auc_val > 0.7, "green4", "red"), lwd = 3, print.auc=FALSE)
+    
+    # Print Verdict
+    cat("\nTarget:", gene, "| AUC:", auc_val)
+    if(auc_val > 0.7) cat(" -> 🌟 GOOD BIOMARKER")
+  }
+}
+```
+```{r}
+# ==============================================================================
+# BIOMARKER PIVOT: The Methylation Check
+# ==============================================================================
+library(pROC)
+library(tidyverse)
+library(ggpubr)
+
+# 1. Retrieve the Methylation Data
+# You generated 'merged_data' in the very first chunk (Figure 1C replication)
+# It contains 'methylation_beta' for cg11303839 and 'disease_status'
+
+if(exists("merged_data")) {
+  
+  # 2. Visualize Separation again (Just to remind us)
+  p_box <- ggplot(merged_data, aes(x = disease_status, y = methylation_beta, fill = disease_status)) +
+    geom_boxplot(alpha = 0.7, outlier.shape = NA) +
+    geom_jitter(width = 0.2, alpha = 0.5) +
+    labs(title = "Biomarker Candidate: cg11303839 (CCL26)", 
+         y = "Methylation Level (Beta)") +
+    theme_classic(base_size = 14)
+  
+  print(p_box)
+  
+  # 3. Calculate ROC
+  # "Controls" usually have higher methylation here, Asthma has lower.
+  # ROC handles direction automatically, but good to know.
+  roc_obj <- roc(response = merged_data$disease_status, 
+                 predictor = merged_data$methylation_beta,
+                 levels = c("Control", "Asthma"))
+  
+  auc_val <- round(auc(roc_obj), 3)
+  
+  # 4. Plot
+  plot(roc_obj, main = paste("Methylation Biomarker (cg11303839)\nAUC =", auc_val),
+       col = "#0072B2", lwd = 3, legacy.axes = TRUE, print.auc = TRUE)
+  
+  cat("\n--- BIOMARKER VERDICT ---\n")
+  cat("Target: cg11303839 (CCL26 Promoter)\n")
+  cat("AUC Score:", auc_val, "\n")
+  
+  if(auc_val > 0.7) cat("✅ SUCCESS: Methylation is the superior diagnostic biomarker!\n")
+  
+} else {
+  cat("Error: 'merged_data' is missing. Please re-run the 'Figure 1C' chunk from the beginning.")
+}
+```
+```{r}
+# ==============================================================================
+# UNBIASED BIOMARKER DISCOVERY (Corrected & Aligned)
+# ==============================================================================
+library(pROC)
+library(tidyverse)
+library(IlluminaHumanMethylation450kanno.ilmn12.hg19)
+library(GEOquery)
+
+# 1. Load the CORRECT Methylation Metadata (GSE85568)
+# We cannot use the RNA-seq metadata here because the GSM IDs are different.
+cat("Loading Methylation Metadata...\n")
+gse_meth <- getGEO(filename="C:/Users/anany/Downloads/GSE85568-GPL13534_series_matrix.txt/GSE85568-GPL13534_series_matrix.txt", getGPL = FALSE)
+pheno_meth <- pData(gse_meth)
+
+# 2. Get the Top 10 Most Significant Sites
+# Ensure 'results' exists from your Limma analysis
+top_sites <- results %>%
+  arrange(adj.P.Val) %>%
+  head(50)
+
+# 3. Get Gene Annotations
+ann450k <- getAnnotation(IlluminaHumanMethylation450kanno.ilmn12.hg19)
+if("CpG_Site" %in% colnames(top_sites)) {
+  top_site_ids <- top_sites$CpG_Site
+} else {
+  top_site_ids <- rownames(top_sites)
+}
+site_info <- ann450k[top_site_ids, c("UCSC_RefGene_Name")] %>%
+  as.data.frame() %>%
+  rownames_to_column(var = "CpG_Site")
+
+# 4. ALIGN DATA (The Crucial Fix)
+# We find the intersection of samples between Beta Matrix and Pheno Table
+common_samples <- intersect(colnames(beta_values), pheno_meth$geo_accession)
+
+cat("Found", length(common_samples), "matching samples.\n")
+
+if(length(common_samples) == 0) stop("❌ No matching IDs found! Check if 'beta_values' and 'pheno_meth' are correct.")
+
+# Subset both to match exactly
+beta_clean <- beta_values[, common_samples]
+pheno_clean <- pheno_meth[match(common_samples, pheno_meth$geo_accession), ]
+
+# Double check
+if(!all(colnames(beta_clean) == pheno_clean$geo_accession)) stop("Alignment failed.")
+
+
+# 5. Calculate AUC Loop
+cat("\n--- TOP 10 METHYLATION BIOMARKERS ---\n")
+results_list <- list()
+
+par(mfrow=c(2,5)) # Grid for 10 plots
+
+for(i in 1:length(top_site_ids)) {
+  cpg <- top_site_ids[i]
+  
+  # Get Gene Name
+  gene <- site_info$UCSC_RefGene_Name[site_info$CpG_Site == cpg]
+  if(length(gene) == 0 || is.na(gene) || gene == "") gene <- "Intergenic"
+  gene <- unlist(strsplit(gene, ";"))[1] # Take first gene if multiple
+  
+  # Extract Beta Values
+  if(cpg %in% rownames(beta_clean)) {
+    site_vals <- beta_clean[cpg, ]
+    status <- pheno_clean$`disease status:ch1`
+    
+    # Run ROC
+    roc_obj <- roc(response = status, predictor = site_vals, 
+                   levels = c("Control", "Asthma"), quiet=TRUE)
+    
+    auc_val <- round(auc(roc_obj), 3)
+    
+    # Store result
+    results_list[[i]] <- data.frame(
+      CpG = cpg,
+      Gene = gene,
+      AUC = auc_val,
+      P_Value = top_sites$adj.P.Val[i]
+    )
+    
+    # Plot
+    plot(roc_obj, main = paste0(gene, "\nAUC=", auc_val),
+         col = ifelse(auc_val > 0.8, "green4", "blue"), lwd = 2, print.auc=FALSE)
+  }
+}
+
+# 6. Print Summary
+final_table <- do.call(rbind, results_list) %>%
+  arrange(desc(AUC))
+
+print(final_table)
+
+best_marker <- final_table[1, ]
+cat("\n🏆 THE WINNER IS: ", best_marker$Gene, "(", best_marker$CpG, ")\n")
+cat("Diagnostic Accuracy (AUC):", best_marker$AUC, "\n")
+```
+```{r}
+# ==============================================================================
+# GET GENE NAMES FOR TOP CpG SITES (SAFE VERSION)
+# ==============================================================================
+library(tidyverse)
+library(IlluminaHumanMethylation450kanno.ilmn12.hg19)
+
+# 1. Prepare the Top Hits Table
+# Sort by significance
+top_hits <- results %>%
+  arrange(adj.P.Val) %>%
+  head(50)
+
+# 2. SAFETY CHECK: Fix the ID Column
+# If "CpG_Site" already exists, do nothing. If not, move row names to that column.
+if(!"CpG_Site" %in% colnames(top_hits)) {
+  top_hits <- top_hits %>% rownames_to_column(var = "CpG_Site")
+}
+
+# 3. Retrieve Annotation Data
+ann450k <- getAnnotation(IlluminaHumanMethylation450kanno.ilmn12.hg19)
+ids <- top_hits$CpG_Site
+
+# 4. Extract and Clean Gene Names
+gene_table <- ann450k[ids, c("UCSC_RefGene_Name", "UCSC_RefGene_Group", "chr", "pos")] %>%
+  as.data.frame() %>%
+  rownames_to_column(var = "CpG_Site") %>%
+  
+  # Clean up the format (Split "Gene;Gene" into just "Gene")
+  mutate(
+    Gene_Symbol = sapply(strsplit(UCSC_RefGene_Name, ";"), function(x) x[1]),
+    Region = sapply(strsplit(UCSC_RefGene_Group, ";"), function(x) x[1])
+  ) %>%
+  
+  # Select readable columns
+  dplyr::select(CpG_Site, Gene_Symbol, Region, chr, pos) %>%
+  
+  # Join with your P-values
+  inner_join(top_hits %>% select(CpG_Site, adj.P.Val), by = "CpG_Site")
+
+# 5. Print Result
+print(gene_table)
+```
+```{r}
+View(gene_table)
+```
+
+
+```{r}
+# ==============================================================================
+# FIND SPECIFIC CpG RANK
+# ==============================================================================
+library(tidyverse)
+library(IlluminaHumanMethylation450kanno.ilmn12.hg19)
+
+target_cpg <- "cg11303839"
+
+# 1. Prepare the Full List (Sorted)
+# We ensure we have the ID column first
+full_ranked <- results %>%
+  arrange(adj.P.Val) 
+
+if(!"CpG_Site" %in% colnames(full_ranked)) {
+  full_ranked <- full_ranked %>% rownames_to_column(var = "CpG_Site")
+}
+
+# 2. Add Rank Column
+full_ranked <- full_ranked %>%
+  mutate(Rank = row_number())
+
+# 3. Find our Target
+target_info <- full_ranked %>%
+  filter(CpG_Site == target_cpg)
+
+# 4. Print the Report
+if(nrow(target_info) > 0) {
+  cat("--- TARGET FOUND ---\n")
+  cat("CpG Site:", target_cpg, "\n")
+  cat("Rank:", target_info$Rank, "out of", nrow(full_ranked), "\n")
+  cat("Adjusted P-Value:", format(target_info$adj.P.Val, scientific=TRUE), "\n")
+  cat("Log Fold Change:", round(target_info$logFC, 3), "\n")
+  
+  if(target_info$Rank <= 100) {
+    cat("Verdict: It is in the Top 100! Excellent replication.\n")
+  } else {
+    cat("Verdict: It is significant, just lower down the list.\n")
+  }
+} else {
+  cat("❌ Error: cg11303839 not found in results. Check if it was filtered out.")
+}
+```
+```{r}
+# ==============================================================================
+# EXTERNAL VALIDATION: CHECKING GSE65163 (Nasal/Children)
+# ==============================================================================
+library(GEOquery)
+library(tidyverse)
+library(limma)
+
+# 1. Load the New Dataset
+# This might take a minute to download
+gse_new <- getGEO(filename = "C:/Users/anany/Downloads/GSE65163_series_matrix.txt/GSE65163_series_matrix.txt", getGPL = FALSE)
+# 2. Extract Data
+beta_new <- exprs(gse_new)
+pheno_new <- pData(gse_new)
+
+# 3. Clean Metadata
+# We need to find the "Asthma" vs "Control" column. 
+# In this dataset, it's often 'characteristics_ch1' or similar.
+# Let's inspect columns to be safe:
+# print(head(pheno_new))
+
+# Assuming standard formatting (Update column name if needed after inspection)
+# Look for a column with "Atopic Asthma" vs "Control"
+target_cpg <- "cg00712106"      # Your "Winner" Site
+target_col <- "asthma:ch1"      # The column you found
+
+# 2. Extract Data
+if(target_cpg %in% rownames(beta_new)) {
+  
+  # Prepare the plotting data
+  plot_data <- data.frame(
+    Sample = rownames(pheno_new),
+    # Extract the TRUE/FALSE column
+    Raw_Status = pheno_new[[target_col]], 
+    Methylation = beta_new[target_cpg, ]
+  ) %>%
+    # 3. Clean the Labels (TRUE -> Asthma, FALSE -> Control)
+    mutate(Group = case_when(
+      grepl("TRUE", Raw_Status, ignore.case = TRUE) ~ "Asthma",
+      grepl("FALSE", Raw_Status, ignore.case = TRUE) ~ "Control",
+      TRUE ~ "Other" # Safety catch
+    )) %>%
+    # Filter out any "Other" if they exist
+    filter(Group %in% c("Asthma", "Control"))
+
+  # 4. Generate Validation Plot
+  p <- ggplot(plot_data, aes(x = Group, y = Methylation, fill = Group)) +
+    geom_boxplot(outlier.shape = NA, alpha = 0.7) +
+    geom_jitter(width = 0.2, alpha = 0.5) +
+    
+    # Calculate P-value automatically
+    stat_compare_means(method = "t.test", label.y = max(plot_data$Methylation) + 0.05) +
+    
+    labs(title = paste("Validation of", target_cpg, "in Nasal Epithelium"),
+         subtitle = "GSE65163 (Children, Nasal Brushings)",
+         y = "Methylation Level (Beta)",
+         x = "Clinical Status") +
+    scale_fill_manual(values = c("Control" = "grey70", "Asthma" = "firebrick")) +
+    theme_classic(base_size = 14) +
+    theme(legend.position = "none")
+
+  print(p)
+  
+} else {
+  cat("Error: Biomarker", target_cpg, "not found in this dataset.")
+}
+```
+```{r}
+# ==============================================================================
+# VALIDATION RESCUE: Find Other CCL26 Sites
+# ==============================================================================
+library(tidyverse)
+library(IlluminaHumanMethylation450kanno.ilmn12.hg19)
+library(ggpubr)
+
+# 1. Get All Sites Associated with CCL26
+cat("Searching for backup sites on CCL26...\n")
+ann450k <- getAnnotation(IlluminaHumanMethylation450kanno.ilmn12.hg19)
+
+# Filter annotation for CCL26 (Pattern match to catch "CCL26;..." formats)
+ccl26_sites <- ann450k[grep("CCL26", ann450k$UCSC_RefGene_Name), ]
+all_ccl26_ids <- rownames(ccl26_sites)
+
+# 2. Check which ones exist in the New Dataset (GSE65163)
+available_sites <- intersect(all_ccl26_ids, rownames(beta_new))
+
+if(length(available_sites) > 0) {
+  cat("✅ Found", length(available_sites), "alternative sites on CCL26 in this dataset!\n")
+  print(available_sites)
+  
+  # 3. Test the First Available Site
+  # You can loop through them, but let's test the first one found
+  backup_cpg <- available_sites[1] 
+  target_col <- "asthma:ch1"
+  
+  # Prepare Plot Data
+  plot_data <- data.frame(
+    Sample = rownames(pheno_new),
+    Raw_Status = pheno_new[[target_col]], 
+    Methylation = beta_new[backup_cpg, ]
+  ) %>%
+    mutate(Group = case_when(
+      grepl("TRUE", Raw_Status, ignore.case = TRUE) ~ "Asthma",
+      grepl("FALSE", Raw_Status, ignore.case = TRUE) ~ "Control"
+    )) %>%
+    filter(Group %in% c("Asthma", "Control"))
+  
+  # 4. Plot Validation
+  p <- ggplot(plot_data, aes(x = Group, y = Methylation, fill = Group)) +
+    geom_boxplot(outlier.shape = NA, alpha = 0.7) +
+    geom_jitter(width = 0.2, alpha = 0.5) +
+    stat_compare_means(method = "t.test", label.y = max(plot_data$Methylation) + 0.05) +
+    
+    labs(title = paste("Validation of CCL26 in Nasal Epithelium"),
+         subtitle = paste("Using backup site:", backup_cpg),
+         y = "Methylation Level (Beta)") +
+    scale_fill_manual(values = c("Control" = "grey70", "Asthma" = "firebrick")) +
+    theme_classic(base_size = 14) +
+    theme(legend.position = "none")
+  
+  print(p)
+  
+} else {
+  cat("❌ Critical: No CpG sites for CCL26 were found in this processed dataset.\n")
+  cat("The authors likely filtered out this entire gene region during QC.")
+}
+```
+```{r}
+# ==============================================================================
+# AUTOMATED CROSS-TISSUE VALIDATION (FIXED)
+# ==============================================================================
+library(tidyverse)
+library(IlluminaHumanMethylation450kanno.ilmn12.hg19)
+
+# --- RE-RUNNING PREVIOUS SETUP TO BE SAFE ---
+# Define thresholds
+P_THRESH_1 <- 0.05  # FDR/Adj.P for Lung
+P_THRESH_2 <- 0.05  # Raw P-value for Nose
+
+# 1. Prepare Candidates from Lung
+candidates <- results %>%
+  filter(adj.P.Val < P_THRESH_1) %>%
+  mutate(CpG_Site = if("CpG_Site" %in% colnames(.)) CpG_Site else rownames(.)) %>%
+  select(CpG_Site, logFC_Lung = logFC, AdjP_Lung = adj.P.Val)
+
+# 2. Prepare Nose Data
+# Create group vector (Asthma vs Control)
+group_vec <- factor(ifelse(grepl("TRUE", pheno_new$`asthma:ch1`, ignore.case=T), "Asthma", "Control"))
+
+# Find overlap
+common_sites <- intersect(candidates$CpG_Site, rownames(beta_new))
+cat("Found", length(common_sites), "overlapping sites.\n")
+
+if(length(common_sites) == 0) stop("No overlapping sites found.")
+
+# 3. Fast Testing Loop
+beta_subset <- beta_new[common_sites, ]
+
+mean_asthma <- rowMeans(beta_subset[, group_vec == "Asthma"], na.rm=TRUE)
+mean_control <- rowMeans(beta_subset[, group_vec == "Control"], na.rm=TRUE)
+delta_beta_nose <- mean_asthma - mean_control
+
+# Calculate P-values
+p_values_nose <- apply(beta_subset, 1, function(x) t.test(x ~ group_vec)$p.value)
+
+# 4. COMPILE RESULTS (THE FIX)
+# -------------------------------
+# Load Annotations
+ann450k <- getAnnotation(IlluminaHumanMethylation450kanno.ilmn12.hg19)
+
+# FIX: Extract genes directly as a vector, ensuring matching order
+gene_vector <- ann450k[common_sites, "UCSC_RefGene_Name"]
+
+validation_results <- data.frame(
+  CpG_Site = common_sites,
+  DeltaBeta_Nose = delta_beta_nose,
+  PValue_Nose = p_values_nose,
+  Gene = as.character(gene_vector) # Force to character to avoid errors
+) %>%
+  # Clean Gene Names (Take first gene if multiple)
+  mutate(Gene = sapply(strsplit(Gene, ";"), `[`, 1)) %>%
+  # Join with Lung Data
+  inner_join(candidates, by = "CpG_Site") %>%
+  # Determine Validation Status
+  mutate(
+    Significant_In_Nose = PValue_Nose < P_THRESH_2,
+    # Check Direction: LogFC (Lung) and DeltaBeta (Nose) should have same sign
+    Direction_Match = sign(logFC_Lung) == sign(DeltaBeta_Nose),
+    
+    Status = case_when(
+      Significant_In_Nose & Direction_Match ~ "VALIDATED (Robust)",
+      Significant_In_Nose & !Direction_Match ~ "Significant (Opposite Direction)",
+      TRUE ~ "Not Validated"
+    )
+  )
+
+# 5. Extract The Winners
+# ----------------------
+winners <- validation_results %>%
+  filter(Status == "VALIDATED (Robust)") %>%
+  arrange(PValue_Nose)
+
+cat("\n--- FINAL RESULTS ---\n")
+cat("Total Candidates Tested:", nrow(validation_results), "\n")
+cat("Successfully Validated:", nrow(winners), "\n")
+
+if(nrow(winners) > 0) {
+  print(head(winners, 30))
+} else {
+  cat("No sites passed strict validation. Check the 'Significant (Opposite Direction)' group?\n")
+}
+
+# 6. Visualization: The Consistency Plot
+# --------------------------------------
+ggplot(validation_results, aes(x = logFC_Lung, y = DeltaBeta_Nose, color = Status)) +
+  geom_point(alpha = 0.6) +
+  geom_hline(yintercept = 0) + geom_vline(xintercept = 0) +
+  scale_color_manual(values = c("Not Validated" = "grey", 
+                                "Significant (Opposite Direction)" = "orange", 
+                                "VALIDATED (Robust)" = "green4")) +
+  geom_smooth(method = "lm", color = "black", linetype = "dashed") +
+  labs(title = "Cross-Tissue Validation",
+       subtitle = "Comparing Effect Sizes: Adult Lung vs. Child Nose",
+       x = "Effect Size Lung (LogFC)",
+       y = "Effect Size Nose (Delta Beta)") +
+  theme_classic()
+```
+```{r}
+View(winners)
+```
+
+
+```{r}
+# ==============================================================================
+# GENE-LEVEL CROSS-TISSUE VALIDATION (FINAL FIX)
+# ==============================================================================
+library(tidyverse)
+library(IlluminaHumanMethylation450kanno.ilmn12.hg19)
+
+# --- CONFIGURATION ---
+P_THRESH_LUNG <- 0.05
+P_THRESH_NOSE <- 0.05
+
+# 1. Summarize Lung Data to Gene Level
+# ------------------------------------
+cat("Step 1: Aggregating Lung Hits by Gene...\n")
+ann450k <- getAnnotation(IlluminaHumanMethylation450kanno.ilmn12.hg19)
+
+lung_genes <- results %>%
+  filter(adj.P.Val < P_THRESH_LUNG) %>%
+  mutate(CpG_Site = if("CpG_Site" %in% colnames(.)) CpG_Site else rownames(.)) %>%
+  # Safe Extraction of Genes
+  # We extract directly to vector to avoid dataframe issues
+  mutate(Gene = as.character(ann450k[CpG_Site, "UCSC_RefGene_Name"])) %>%
+  mutate(Gene = sapply(strsplit(Gene, ";"), `[`, 1)) %>%
+  filter(Gene != "" & !is.na(Gene)) %>%
+  group_by(Gene) %>%
+  summarize(
+    Lung_Sites_Count = n(),
+    Lung_Mean_LogFC = mean(logFC),
+    Lung_Best_P = min(adj.P.Val)
+  )
+
+cat("Found", nrow(lung_genes), "significant genes in Lung.\n")
+
+
+# 2. Find These Genes in the Nose Dataset (THE FIX)
+# -------------------------------------------------
+cat("Step 2: Finding matching genes in Nose dataset...\n")
+
+# A. Find common CpG sites first
+# We only care about sites that exist in the Nose dataset (beta_new)
+nose_cpgs <- rownames(beta_new)
+valid_nose_cpgs <- intersect(nose_cpgs, rownames(ann450k))
+
+# B. Create the Mapping Table DIRECTLY (Fixes the Error)
+# We avoid creating an intermediate subset object to stop the vector conversion
+nose_mapping <- data.frame(
+  CpG_Site = valid_nose_cpgs,
+  # Extract the column directly as a character vector
+  UCSC_RefGene_Name = as.character(ann450k[valid_nose_cpgs, "UCSC_RefGene_Name"]),
+  stringsAsFactors = FALSE
+) %>%
+  mutate(Gene = sapply(strsplit(UCSC_RefGene_Name, ";"), `[`, 1)) %>%
+  filter(Gene %in% lung_genes$Gene)
+
+target_nose_sites <- nose_mapping$CpG_Site
+cat("Testing", length(target_nose_sites), "CpG sites in Nose (covering", length(unique(nose_mapping$Gene)), "genes)...\n")
+
+
+# 3. Test the Nose Sites
+# ----------------------
+if(length(target_nose_sites) > 0) {
+  
+  # Group Vector (Asthma vs Control)
+  group_vec <- factor(ifelse(grepl("TRUE", pheno_new$`asthma:ch1`, ignore.case=T), "Asthma", "Control"))
+  
+  # Subset Data
+  beta_subset <- beta_new[target_nose_sites, , drop=FALSE]
+  
+  # Calculate Stats (Fast Loop)
+  nose_p_values <- apply(beta_subset, 1, function(x) {
+    tryCatch(t.test(x ~ group_vec)$p.value, error = function(e) NA)
+  })
+  
+  nose_stats <- data.frame(
+    CpG_Site = target_nose_sites,
+    Gene = nose_mapping$Gene,
+    P_Value = nose_p_values,
+    # Calculate Delta Beta (Asthma - Control)
+    Delta_Beta = rowMeans(beta_subset[, group_vec == "Asthma"], na.rm=T) - 
+                 rowMeans(beta_subset[, group_vec == "Control"], na.rm=T)
+  ) %>%
+    drop_na(P_Value)
+  
+  # 4. Aggregate Nose Results to Gene Level
+  # ---------------------------------------
+  nose_gene_summary <- nose_stats %>%
+    group_by(Gene) %>%
+    summarize(
+      Nose_Significant_Sites = sum(P_Value < P_THRESH_NOSE),
+      Nose_Mean_DeltaBeta = mean(Delta_Beta),
+      Nose_Best_P = min(P_Value)
+    ) %>%
+    filter(Nose_Significant_Sites > 0)
+  
+  
+  # 5. Final Merge & "Winner" Identification
+  # ----------------------------------------
+  cross_tissue_genes <- inner_join(lung_genes, nose_gene_summary, by = "Gene") %>%
+    mutate(
+      Direction_Match = sign(Lung_Mean_LogFC) == sign(Nose_Mean_DeltaBeta)
+    ) %>%
+    arrange(Nose_Best_P)
+  
+  cat("\n--- GENE-LEVEL VALIDATION RESULTS ---\n")
+  cat("Total Genes Significant in BOTH Tissues:", nrow(cross_tissue_genes), "\n")
+  cat("Genes with Matching Direction:", sum(cross_tissue_genes$Direction_Match, na.rm=TRUE), "\n")
+  
+  if(nrow(cross_tissue_genes) > 0) {
+    cat("\nTop 15 Universal Asthma Genes:\n")
+    print(cross_tissue_genes %>% 
+            select(Gene, Lung_Mean_LogFC, Nose_Mean_DeltaBeta, Direction_Match) %>% 
+            head(15))
+    
+    # 6. Plot the Result
+    print(ggplot(cross_tissue_genes, aes(x = Lung_Mean_LogFC, y = Nose_Mean_DeltaBeta)) +
+      geom_point(aes(color = Direction_Match), alpha = 0.7, size = 3) +
+      geom_text(aes(label = ifelse(abs(Lung_Mean_LogFC) > 0.5 | abs(Nose_Mean_DeltaBeta) > 0.05, Gene, "")),
+                vjust = 1.5, size = 3) +
+      geom_hline(yintercept = 0) + geom_vline(xintercept = 0) +
+      geom_smooth(method = "lm", se = FALSE, linetype = "dashed", color = "black") +
+      scale_color_manual(values = c("TRUE" = "green4", "FALSE" = "grey")) +
+      labs(title = "Universal Gene Validation",
+           subtitle = "Genes altered in both Adult Lungs and Child Noses",
+           x = "Mean Effect Lung (LogFC)",
+           y = "Mean Effect Nose (Delta Beta)",
+           color = "Direction Match") +
+      theme_classic())
+  } else {
+    cat("No genes passed the validation threshold in both tissues.\n")
+  }
+
+} else {
+  cat("No sites from the significant lung genes were found in the nose dataset.\n")
+}
+```
+```{r}
+library(org.Hs.eg.db)
+library(tidyverse)
+
+# 1. Define your list of interesting genes
+# (These are the ones you found in your validation/winners steps)
+my_genes <- c("CCL26", "POSTN", "MUC5AC", "MUC5B", "CLCA1", "SERPINB2", "CST1", "GATA3", "IL13", "AHRR") 
+
+# 2. Extract Functional Info (THE FIX)
+# We use 'AnnotationDbi::select' to avoid the conflict
+gene_info <- AnnotationDbi::select(org.Hs.eg.db, 
+                                   keys = my_genes, 
+                                   columns = c("GENENAME", "GO"), # We want the Full Name and GO Terms
+                                   keytype = "SYMBOL")
+
+# 3. Clean it up
+# This gives you a clean dictionary of just the names first
+clean_dictionary <- gene_info %>%
+  distinct(SYMBOL, .keep_all = TRUE) %>%
+  dplyr::select(SYMBOL, GENENAME) # Here we use dplyr::select for the table
+
+# 4. Print it nicely
+print(clean_dictionary)
+
+# Optional: Save to CSV
+# write.csv(clean_dictionary, "My_Gene_Functions.csv")
+```
+```{r}
+# 1. Define your list of interesting genes
+# (These are the ones you found in your validation/winners steps)
+my_genes <- c("ACOT7", "SLC9A4", "ZNF862", "RHBDD2", "NRTK1", "HDAC9", "EIF4E3", "ST18", "TREML2", "IRX4", "ESPN", "PRRX1", "MBOAT2", "KCNIP1", "TBX15", "EFNA5") 
+
+# 2. Extract Functional Info (THE FIX)
+# We use 'AnnotationDbi::select' to avoid the conflict
+gene_info <- AnnotationDbi::select(org.Hs.eg.db, 
+                                   keys = my_genes, 
+                                   columns = c("GENENAME", "GO"), # We want the Full Name and GO Terms
+                                   keytype = "SYMBOL")
+
+# 3. Clean it up
+# This gives you a clean dictionary of just the names first
+clean_dictionary <- gene_info %>%
+  distinct(SYMBOL, .keep_all = TRUE) %>%
+  dplyr::select(SYMBOL, GENENAME) # Here we use dplyr::select for the table
+
+# 4. Print it nicely
+print(clean_dictionary)
+
+# Optional: Save to CSV
+# write.csv(clean_dictionary, "My_Gene_Functions.csv")
+```
+```{r}
+# 1. Define your list of interesting genes
+# (These are the ones you found in your validation/winners steps)
+my_genes <- c("ACOT7", "SLC9A4", "ZNF862", "RHBDD2", "NRTK1", "HDAC9", "EIF4E3", "ST18", "TREML2", "IRX4", "ESPN", "PRRX1", "MBOAT2", "KCNIP1", "TBX15", "EFNA5") 
+
+# 2. Extract Functional Info (THE FIX)
+# We use 'AnnotationDbi::select' to avoid the conflict
+gene_info <- AnnotationDbi::select(org.Hs.eg.db, 
+                                   keys = my_genes, 
+                                   columns = c("GENENAME", "GO"), # We want the Full Name and GO Terms
+                                   keytype = "SYMBOL")
+
+# 3. Clean it up
+# This gives you a clean dictionary of just the names first
+clean_dictionary <- gene_info %>%
+  distinct(SYMBOL, .keep_all = TRUE) %>%
+  dplyr::select(SYMBOL, GENENAME) # Here we use dplyr::select for the table
+
+# 4. Print it nicely
+print(clean_dictionary)
+
+# Optional: Save to CSV
+# write.csv(clean_dictionary, "My_Gene_Functions.csv")
+```
+
+```{r}
+# ==============================================================================
+# GENE METHYLATION CHECKER
+# ==============================================================================
+library(tidyverse)
+library(IlluminaHumanMethylation450kanno.ilmn12.hg19)
+
+# --- 1. ENTER GENE NAME HERE ---
+TARGET_GENE <- "DUOX1"  # <--- Change this to "POSTN", "AHRR", "MUC5AC", etc.
+# -------------------------------
+
+# 2. Get Annotations
+cat("Searching for", TARGET_GENE, "in methylation results...\n")
+ann450k <- getAnnotation(IlluminaHumanMethylation450kanno.ilmn12.hg19)
+
+# 3. Find CpG Sites for this Gene
+# We search the annotation for the gene name
+gene_sites <- ann450k[grep(paste0("^", TARGET_GENE, ";|;", TARGET_GENE, "$|;", TARGET_GENE, ";|^", TARGET_GENE, "$"), ann450k$UCSC_RefGene_Name), ]
+target_cpgs <- rownames(gene_sites)
+
+# 4. Extract Stats from Your Results
+# Ensure 'results' has the CpG_Site column
+if(!"CpG_Site" %in% colnames(results)) {
+  results_w_id <- results %>% rownames_to_column("CpG_Site")
+} else {
+  results_w_id <- results
+}
+
+gene_stats <- results_w_id %>%
+  filter(CpG_Site %in% target_cpgs) %>%
+  select(CpG_Site, logFC, adj.P.Val, P.Value) %>%
+  mutate(
+    Direction = ifelse(logFC > 0, "Hyper-methylated", "Hypo-methylated"),
+    Significance = ifelse(adj.P.Val < 0.05, "Significant", "Not Significant")
+  ) %>%
+  arrange(adj.P.Val)
+
+# 5. Calculate Summary
+if(nrow(gene_stats) > 0) {
+  avg_change <- mean(gene_stats$logFC)
+  verdict <- ifelse(avg_change > 0, "HYPER-methylation", "HYPO-methylation")
+  
+  cat("\n--- RESULTS FOR:", TARGET_GENE, "---\n")
+  cat("Total CpG Sites Found:", nrow(gene_stats), "\n")
+  cat("Significant Sites (FDR < 0.05):", sum(gene_stats$Significance == "Significant"), "\n")
+  cat("Average Methylation Change (LogFC):", round(avg_change, 4), "\n")
+  cat("Overall Trend:", verdict, "\n\n")
+  
+  # Print the top 5 sites
+  print(head(gene_stats, 10))
+  
+  # 6. Plot the Sites
+  print(ggplot(gene_stats, aes(x = CpG_Site, y = logFC, fill = Direction)) +
+    geom_col() +
+    geom_hline(yintercept = 0) +
+    labs(title = paste("Methylation Status of", TARGET_GENE),
+         subtitle = paste("Trend:", verdict),
+         y = "Log Fold Change (Methylation)",
+         x = "CpG Sites") +
+    scale_fill_manual(values = c("Hyper-methylated" = "firebrick", "Hypo-methylated" = "steelblue")) +
+    theme_classic() +
+    theme(axis.text.x = element_text(angle = 90, hjust = 1, size = 8)))
+  
+} else {
+  cat("❌ Gene not found in the methylation dataset. Check spelling.")
+}
+```
+HYPOMETH of DUOX1 at cg13570892
+```{r}
+# ==============================================================================
+# GENOMIC REGION CHECKER: PRRX1
+# ==============================================================================
+library(tidyverse)
+library(IlluminaHumanMethylation450kanno.ilmn12.hg19)
+
+# 1. Define Gene and Specific Site (from your results)
+target_gene <- "PRRX1"
+specific_site <- "cg26048630" # The winner from your table
+
+# 2. Get Annotations
+ann450k <- getAnnotation(IlluminaHumanMethylation450kanno.ilmn12.hg19)
+
+# 3. Find All Sites for PRRX1
+# We look for the gene name
+gene_hits <- ann450k[grep(paste0("^", target_gene, ";|;", target_gene, "$|;", target_gene, ";|^", target_gene, "$"), 
+                          ann450k$UCSC_RefGene_Name), ]
+
+# 4. Extract Location Data
+location_info <- data.frame(
+  CpG_Site = rownames(gene_hits),
+  Location = gene_hits$UCSC_RefGene_Group,
+  Island_Status = gene_hits$Relation_to_UCSC_CpG_Island
+) %>%
+  # Clean up the format (sometimes listed multiple times like "Body;Body")
+  mutate(
+    Simple_Location = sapply(strsplit(as.character(Location), ";"), `[`, 1)
+  )
+
+# 5. Check Your Specific Winner
+winner_info <- location_info %>% filter(CpG_Site == specific_site)
+
+cat("\n--- LOCATION RESULT FOR YOUR WINNER ---\n")
+if(nrow(winner_info) > 0) {
+  cat("Site:", specific_site, "\n")
+  cat("Region:", winner_info$Simple_Location, "\n")
+  cat("CpG Context:", winner_info$Island_Status, "\n")
+  
+  # INTERPRETATION LOGIC
+  loc <- winner_info$Simple_Location
+  if(loc %in% c("TSS1500", "TSS200", "5'UTR", "1stExon")) {
+    cat("VERDICT: PROMOTER REGION.\n")
+    cat(" -> Hyper-methylation here usually turns the gene OFF (Silencing).\n")
+    cat(" -> Theory: The body is trying to stop fibrosis (Compensatory).\n")
+  } else if (loc %in% c("Body", "3'UTR")) {
+    cat("VERDICT: GENE BODY.\n")
+    cat(" -> Hyper-methylation here often turns the gene ON (Active Transcription).\n")
+    cat(" -> Theory: This drives the fibrosis active mechanism.\n")
+  }
+} else {
+  cat("Site", specific_site, "not found in annotation database.\n")
+}
+
+# 6. Show all sites for context
+cat("\n--- All PRRX1 Sites on Array ---\n")
+print(location_info)
+```
+
+```{r}
+# ==============================================================================
+# BIOMARKER ANALYSIS: TREATMENT ADHERENCE (POSTN)
+# ==============================================================================
+library(pROC)
+library(tidyverse)
+library(ggpubr)
+library(org.Hs.eg.db)
+
+# 1. Define the Adherence Marker
+target_gene <- "POSTN"
+
+# 2. Get Safe IDs (Map Symbol -> Ensembl)
+gene_map <- AnnotationDbi::select(org.Hs.eg.db, 
+                                  keys = target_gene, 
+                                  columns = "ENSEMBL", 
+                                  keytype = "SYMBOL")
+
+# 3. Extract Data
+if(!exists("cpm_counts")) cpm_counts <- cpm(dge, log=TRUE)
+ens_id <- gene_map$ENSEMBL[1]
+
+# Find the row in your data
+match_row <- grep(ens_id, rownames(cpm_counts), value = TRUE)[1]
+
+if(!is.na(match_row)) {
+  
+  # Extract expression
+  expr_vals <- as.numeric(cpm_counts[match_row, ])
+  
+  # Create Plot Data
+  plot_data <- data.frame(
+    Sample = colnames(cpm_counts),
+    Group = targets$group, # Asthma vs Control
+    Expression = expr_vals
+  )
+  
+  # 4. VISUALIZATION: The "Target Range"
+  # We want to see if Asthma patients are pushed down to (or below) Control levels
+  p <- ggplot(plot_data, aes(x = Group, y = Expression, fill = Group)) +
+    geom_boxplot(alpha = 0.7, outlier.shape = NA) +
+    geom_jitter(width = 0.2, alpha = 0.5) +
+    
+    # Add statistical test
+    stat_compare_means(method = "t.test", label.y = max(plot_data$Expression) + 0.5) +
+    
+    # Colors: Control (Grey), Asthma (Blue to indicate suppression)
+    scale_fill_manual(values = c("Control" = "grey70", "Asthma" = "steelblue")) +
+    
+    labs(title = paste("Adherence Biomarker:", target_gene),
+         subtitle = "Low levels in Asthma group indicate effective steroid suppression",
+         y = "Log2 Expression (CPM)",
+         x = "Patient Status") +
+    theme_classic(base_size = 14) +
+    theme(legend.position = "none")
+  
+  print(p)
+  
+  # 5. DIAGNOSTIC ACCURACY (ROC)
+  # Logic: Can low POSTN distinguish these treated patients?
+  # Note: Since Asthma is LOWER, we expect the direction to be reversed compared to MUC5AC
+  roc_obj <- roc(response = plot_data$Group, predictor = plot_data$Expression,
+                 levels = c("Control", "Asthma"), direction = ">") # > means Controls are higher
+  
+  auc_val <- round(auc(roc_obj), 3)
+  
+  # Plot ROC
+  plot(roc_obj, main = paste("ROC: Distinguishing Treated Asthma\nAUC =", auc_val),
+       col = "steelblue", lwd = 3, legacy.axes = TRUE, print.auc = TRUE)
+  
+  cat("\n--- BIOMARKER VERDICT ---\n")
+  cat("Target:", target_gene, "\n")
+  cat("Mean Expression (Control):", mean(plot_data$Expression[plot_data$Group == "Control"]), "\n")
+  cat("Mean Expression (Asthma):", mean(plot_data$Expression[plot_data$Group == "Asthma"]), "\n")
+  cat("Interpretation: If Asthma is lower/equal to Control, the 'Steroid Suppression' is active.\n")
+  
+} else {
+  cat("Error: POSTN not found in dataset.\n")
+}
+```
+```{r}
+# ==============================================================================
+# UNBIASED EXPRESSION BIOMARKER CHECK
+# ==============================================================================
+library(pROC)
+library(tidyverse)
+library(edgeR)
+
+# 1. Get the Top 10 DE Genes (from your edgeR results)
+# We use the full_results_table from earlier
+if(exists("full_results_table")) {
+  
+  top_genes <- full_results_table %>%
+    arrange(PValue) %>% # Sort by strongest signal
+    head(10)
+  
+  # 2. Extract Counts
+  if(!exists("cpm_counts")) cpm_counts <- cpm(dge, log=TRUE)
+  
+  cat("--- TESTING TOP 10 EXPRESSION MARKERS ---\n")
+  
+  par(mfrow=c(2,5)) # Grid for plots
+  
+  for(i in 1:nrow(top_genes)) {
+    gene_id <- rownames(top_genes)[i]
+    gene_name <- top_genes$symbol[i]
+    
+    if(gene_id %in% rownames(cpm_counts)) {
+      
+      # Get Data
+      expr_vals <- as.numeric(cpm_counts[gene_id, ])
+      status <- targets$group # Asthma vs Control
+      
+      # Run ROC
+      roc_obj <- roc(response = status, predictor = expr_vals, 
+                     levels = c("Control", "Asthma"), quiet=TRUE)
+      auc_val <- round(auc(roc_obj), 3)
+      
+      # Plot
+      color <- ifelse(auc_val > 0.8, "green4", "red")
+      plot(roc_obj, main=paste0(gene_name, "\nAUC=", auc_val), 
+           col=color, lwd=2, print.auc=FALSE)
+      
+      cat(gene_name, ": AUC =", auc_val, "\n")
+    }
+  }
+  
+} else {
+  cat("Error: full_results_table missing.")
+}
+```
+```{r}
+# ==============================================================================
+# TARGETED VALIDATION: CCL26, DUOX1, CYP27B1 in Children (GSE65163)
+# ==============================================================================
+library(tidyverse)
+library(ggpubr)
+library(IlluminaHumanMethylation450kanno.ilmn12.hg19)
+
+# 1. Define Your Target Genes
+targets <- c("CCL26", "DUOX1", "CYP27B1")
+
+# 2. Get Annotations
+ann450k <- getAnnotation(IlluminaHumanMethylation450kanno.ilmn12.hg19)
+
+# 3. Setup Plotting Grid
+par(mfrow=c(1,3)) 
+
+# 4. Loop Through Each Gene
+for(gene in targets) {
+  cat("\n--- Checking Gene:", gene, "---\n")
+  
+  # A. Find CpG sites for this gene
+  # We look for the gene name in the annotation
+  gene_sites <- ann450k[grep(paste0("^", gene, ";|;", gene, "$|;", gene, ";|^", gene, "$"), 
+                             ann450k$UCSC_RefGene_Name), ]
+  
+  if(nrow(gene_sites) == 0) {
+    cat("❌ No CpG sites found for", gene, "in annotation.\n")
+    next
+  }
+  
+  potential_cpgs <- rownames(gene_sites)
+  
+  # B. Find which sites exist in the Children's Dataset (beta_new)
+  available_cpgs <- intersect(potential_cpgs, rownames(beta_new))
+  
+  if(length(available_cpgs) > 0) {
+    cat("✅ Found", length(available_cpgs), "sites in children's dataset.\n")
+    
+    # C. Pick the best site to test
+    # Ideally, we pick the one that was most significant in YOUR adult analysis.
+    # If we don't have that info handy, we take the first available one as a proxy.
+    # (Or you can manually specify: target_cpg <- "cg13570892" for DUOX1)
+    
+    test_cpg <- available_cpgs[1] 
+    
+    # Special overrides if you know the specific ID from your results:
+    if(gene == "DUOX1" && "cg13570892" %in% available_cpgs) test_cpg <- "cg13570892"
+    if(gene == "CCL26" && "cg11303839" %in% available_cpgs) test_cpg <- "cg11303839"
+    
+    cat("Testing representative site:", test_cpg, "\n")
+    
+    # D. Prepare Data
+    plot_data <- data.frame(
+      Sample = rownames(pheno_new),
+      Raw_Status = pheno_new[[target_col]], # Uses the 'asthma:ch1' column defined earlier
+      Methylation = beta_new[test_cpg, ]
+    ) %>%
+      mutate(Group = case_when(
+        grepl("TRUE", Raw_Status, ignore.case = TRUE) ~ "Asthma",
+        grepl("FALSE", Raw_Status, ignore.case = TRUE) ~ "Control"
+      )) %>%
+      filter(Group %in% c("Asthma", "Control"))
+    
+    # E. Plot
+    p <- ggplot(plot_data, aes(x = Group, y = Methylation, fill = Group)) +
+      geom_boxplot(outlier.shape = NA, alpha = 0.7) +
+      geom_jitter(width = 0.2, alpha = 0.5) +
+      stat_compare_means(method = "t.test", label.y = max(plot_data$Methylation) + 0.05) +
+      labs(title = paste(gene, "in Children"),
+           subtitle = paste("Site:", test_cpg),
+           y = "Methylation Beta") +
+      scale_fill_manual(values = c("Control" = "grey70", "Asthma" = "firebrick")) +
+      theme_classic() +
+      theme(legend.position = "none")
+    
+    print(p)
+    
+  } else {
+    cat("❌ None of the CpG sites for", gene, "are present in the children's dataset (Filtered out).\n")
+  }
+}
+```
+```{r}
+# ==============================================================================
+# GENE METHYLATION CHECKER (VALIDATION DATASET - GSE65163)
+# ==============================================================================
+library(tidyverse)
+library(IlluminaHumanMethylation450kanno.ilmn12.hg19)
+
+# --- CONFIGURATION ---
+TARGET_GENE <- "PRRX1"  # Change to "CYP27B1" or others
+DATASET_NAME <- "GSE65163 (Children)"
+# ---------------------
+
+# 1. Get Annotations
+cat("Searching for", TARGET_GENE, "in validation dataset...\n")
+ann450k <- getAnnotation(IlluminaHumanMethylation450kanno.ilmn12.hg19)
+
+# 2. Find All CpG Sites for this Gene
+gene_sites <- ann450k[grep(paste0("^", TARGET_GENE, ";|;", TARGET_GENE, "$|;", TARGET_GENE, ";|^", TARGET_GENE, "$"), 
+                           ann450k$UCSC_RefGene_Name), ]
+potential_cpgs <- rownames(gene_sites)
+
+# 3. Filter for Sites Present in the Dataset
+valid_cpgs <- intersect(potential_cpgs, rownames(beta_new))
+
+if(length(valid_cpgs) > 0) {
+  
+  cat("✅ Found", length(valid_cpgs), "sites for", TARGET_GENE, "\n")
+  
+  # 4. Prepare Group Data
+  # Assume 'pheno_new' and 'target_col' ('asthma:ch1') are already set up
+  group_vec <- factor(ifelse(grepl("TRUE", pheno_new[[target_col]], ignore.case=T), "Asthma", "Control"))
+  
+  # 5. Calculate Delta Beta (Effect Size) for Each Site
+  # We extract the beta values for these sites
+  beta_subset <- beta_new[valid_cpgs, , drop=FALSE]
+  
+  site_stats <- data.frame(
+    CpG_Site = valid_cpgs,
+    Mean_Asthma = rowMeans(beta_subset[, group_vec == "Asthma"], na.rm=TRUE),
+    Mean_Control = rowMeans(beta_subset[, group_vec == "Control"], na.rm=TRUE)
+  ) %>%
+    mutate(
+      Delta_Beta = Mean_Asthma - Mean_Control,
+      Direction = ifelse(Delta_Beta > 0, "Hyper-methylated", "Hypo-methylated")
+    ) %>%
+    arrange(desc(abs(Delta_Beta))) # Sort by biggest change
+  
+  # 6. Calculate P-values (T-test) for top sites
+  site_stats$P_Value <- apply(beta_subset, 1, function(x) t.test(x ~ group_vec)$p.value)
+  
+  # 7. Print Summary
+  avg_change <- mean(site_stats$Delta_Beta)
+  verdict <- ifelse(avg_change > 0, "HYPER-methylation", "HYPO-methylation")
+  
+  cat("\n--- VALIDATION RESULTS FOR:", TARGET_GENE, "---\n")
+  cat("Average Methylation Change (Delta Beta):", round(avg_change, 4), "\n")
+  cat("Overall Trend in Children:", verdict, "\n")
+  cat("Top Site:", site_stats$CpG_Site[1], "(P =", format(site_stats$P_Value[1], scientific=TRUE), ")\n\n")
+  
+  print(head(site_stats))
+  
+  # 8. Plot the Profile
+  print(ggplot(site_stats, aes(x = reorder(CpG_Site, -Delta_Beta), y = Delta_Beta, fill = Direction)) +
+          geom_col() +
+          geom_hline(yintercept = 0) +
+          labs(title = paste(TARGET_GENE, "Methylation in Children"),
+               subtitle = paste("Dataset:", DATASET_NAME),
+               y = "Difference (Asthma - Control)",
+               x = "CpG Sites") +
+          scale_fill_manual(values = c("Hyper-methylated" = "firebrick", "Hypo-methylated" = "steelblue")) +
+          theme_classic() +
+          theme(axis.text.x = element_text(angle = 90, hjust = 1, size = 8)))
+  
+} else {
+  cat("❌ Gene not found in this dataset (All probes filtered out).\n")
+}
+site_stats$Adj_P_Value <- p.adjust(site_stats$P_Value, method = "BH")
+
+# 2. Add a clear "Significance" Label
+# We define "Significant" as P < 0.05 (You can change this to Adj_P_Value if you prefer)
+site_stats <- site_stats %>%
+  mutate(
+    Significance = case_when(
+      P_Value < 0.05 ~ "*** SIGNIFICANT ***",
+      P_Value < 0.10 ~ ".  Trending",
+      TRUE ~ "NS (Not Significant)"
+    )
+  ) %>%
+  # Re-order columns to make it readable
+  select(CpG_Site, Delta_Beta, P_Value, Adj_P_Value, Significance, Direction)
+
+# 3. Print the Final Table
+cat("\n--- FINAL VALIDATION STATS ---\n")
+print(site_stats)
+```
+
+```{r}
+# ==============================================================================
+# UPDATE: Add Adjusted P-Values & Significance Labels
+# ==============================================================================
+
+# 1. Apply Multiple Testing Correction (FDR)
+# We use p.adjust() to create the adjusted p-value column
+site_stats$Adj_P_Value <- p.adjust(site_stats$P_Value, method = "BH")
+
+# 2. Add a clear "Significance" Label
+# We define "Significant" as P < 0.05 (You can change this to Adj_P_Value if you prefer)
+site_stats <- site_stats %>%
+  mutate(
+    Significance = case_when(
+      P_Value < 0.05 ~ "*** SIGNIFICANT ***",
+      P_Value < 0.10 ~ ".  Trending",
+      TRUE ~ "NS (Not Significant)"
+    )
+  ) %>%
+  # Re-order columns to make it readable
+  select(CpG_Site, Delta_Beta, P_Value, Adj_P_Value, Significance, Direction)
+
+# 3. Print the Final Table
+cat("\n--- FINAL VALIDATION STATS ---\n")
+print(site_stats)
+```
+```{r}
+# ==============================================================================
+# REPAIR SCRIPT: SPI1 Biomarker Check
+# ==============================================================================
+library(pROC)
+library(tidyverse)
+library(ggpubr)
+library(org.Hs.eg.db)
+library(GEOquery)
+library(edgeR)
+
+# --- STEP 1: REPAIR THE 'TARGETS' TABLE ---
+# (This fixes the error you saw)
+if(!"group" %in% colnames(targets)) {
+  cat("Repairing 'targets' metadata table...\n")
+  
+  # Load Metadata (Adjust path if needed, or use the object if loaded)
+  if(!exists("pheno_data")) {
+    # Try to load from GEO if local file missing
+    gse_expr <- getGEO("GSE85567", getGPL = FALSE)[[1]]
+    pheno_data <- pData(gse_expr)
+  }
+  
+  # Re-create the targets dataframe
+  targets <- data.frame(
+    sample_id = rownames(pheno_data),
+    group = pheno_data$`disease status:ch1`
+  ) %>%
+    mutate(group = str_remove(group, "disease status: ")) %>%
+    mutate(group = factor(group, levels = c("Control", "Asthma")))
+    
+  cat("✅ Targets table restored.\n")
+}
+
+
+# --- STEP 2: RUN SPI1 ANALYSIS ---
+target_gene <- "SPI1"
+
+# Get ID
+gene_map <- AnnotationDbi::select(org.Hs.eg.db, 
+                                  keys = target_gene, 
+                                  columns = "ENSEMBL", 
+                                  keytype = "SYMBOL")
+ens_id <- gene_map$ENSEMBL[1]
+
+# Get Data
+if(!exists("cpm_counts")) cpm_counts <- cpm(dge, log=TRUE)
+match_row <- grep(ens_id, rownames(cpm_counts), value = TRUE)[1]
+
+if(!is.na(match_row)) {
+  
+  cat("✅ Found SPI1 as:", match_row, "\n")
+  
+  # Extract expression
+  expr_vals <- as.numeric(cpm_counts[match_row, ])
+  
+  # Create Plot Data
+  plot_data <- data.frame(
+    Sample = colnames(cpm_counts),
+    Group = targets$group, 
+    Expression = expr_vals
+  )
+  
+  # Boxplot
+  p <- ggplot(plot_data, aes(x = Group, y = Expression, fill = Group)) +
+    geom_boxplot(alpha = 0.7, outlier.shape = NA) +
+    geom_jitter(width = 0.2, alpha = 0.5) +
+    stat_compare_means(method = "t.test", label.y = max(plot_data$Expression) + 0.5) +
+    scale_fill_manual(values = c("Control" = "grey70", "Asthma" = "orange")) +
+    labs(title = paste("Biomarker Potential:", target_gene),
+         y = "Log2 Expression (CPM)") +
+    theme_classic(base_size = 14) +
+    theme(legend.position = "none")
+  
+  print(p)
+  
+  # ROC Curve
+  roc_obj <- roc(response = plot_data$Group, predictor = plot_data$Expression,
+                 levels = c("Control", "Asthma"), quiet = TRUE)
+  
+  auc_val <- round(auc(roc_obj), 3)
+  
+  plot(roc_obj, main = paste("ROC Curve for SPI1\nAUC =", auc_val),
+       col = "#D55E00", lwd = 3, legacy.axes = TRUE, print.auc = TRUE)
+  
+  cat("\n--- VERDICT ---\n")
+  cat("SPI1 AUC:", auc_val, "\n")
+  if(auc_val > 0.7) cat("Result: Good Biomarker.\n") else cat("Result: Poor Biomarker (Suppressed?).\n")
+
+} else {
+  cat("Error: SPI1 not found in data.\n")
+}
+```
+
